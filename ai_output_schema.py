@@ -33,6 +33,14 @@ AI_OUTPUT_SCHEMA = {
         "buy_sell_points": ["string"],
         "divergences": ["string"]
     },
+    "primary_scenario": {
+        "direction": "string",
+        "target_pct": "number",
+        "stop_pct": "number",
+        "probability": "number",
+        "trigger": "string",
+        "reasoning": "string"
+    },
     "scenarios": [
         {
             "rank": "number",
@@ -61,7 +69,7 @@ def validate_ai_output(output: Dict[str, Any]) -> Dict[str, Any]:
     """
     
     # 1. 检查必需的顶层字段
-    required_keys = ["meta", "structure_judgement", "scenarios"]
+    required_keys = ["meta", "structure_judgement", "primary_scenario", "scenarios"]
     for key in required_keys:
         if key not in output:
             raise ValueError(f"AI 输出缺少必需字段: {key}")
@@ -130,6 +138,14 @@ def get_schema_template() -> str:
   "signals": {
     "buy_sell_points": ["string"],
     "divergences": ["string"]
+  },
+  "primary_scenario": {
+    "direction": "up" | "down",
+    "target_pct": "number (目标涨跌幅，正数)",
+    "stop_pct": "number (止损幅度，正数)",
+    "probability": "number (0~1)",
+    "trigger": "string (触发条件)",
+    "reasoning": "string (逻辑推导)"
   },
   "scenarios": [
     {

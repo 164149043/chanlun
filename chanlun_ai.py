@@ -64,7 +64,9 @@ def init_db():
         price REAL NOT NULL,
         chanlun_json TEXT NOT NULL,
         ai_json TEXT,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        evaluated INTEGER DEFAULT 0,
+        outcome_json TEXT
     )
     """)
 

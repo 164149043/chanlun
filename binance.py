@@ -28,13 +28,14 @@ _BASE_URL = "https://api.binance.com"
 _KLINES_PATH = "/api/v3/klines"
 
 
-def get_klines(symbol: str, interval: str, limit: int) -> List[Dict[str, Any]]:
+def get_klines(symbol: str, interval: str, limit: int, start_time: int = None) -> List[Dict[str, Any]]:
     """从 Binance 获取指定交易对与周期的历史 K 线数据
 
     参数：
-    - symbol:   交易对名称，例如 "BTCUSDT"（注意：现货不带斜杠）。
-    - interval: K 线周期，例如 "1m"、"5m"、"15m"、"1h"、"4h"、"1d" 等。
-    - limit:    返回的 K 线数量上限（1-1000）。
+    - symbol:     交易对名称，例如 "BTCUSDT"（注意：现货不带斜杠）。
+    - interval:   K 线周期，例如 "1m"、"5m"、"15m"、"1h"、"4h"、"1d" 等。
+    - limit:      返回的 K 线数量上限（1-1000）。
+    - start_time: 开始时间（毫秒时间戳），可选。如果提供，将从该时间开始获取 K 线。
 
     返回：
     - List[dict]，每个元素的结构严格为：
@@ -61,6 +62,10 @@ def get_klines(symbol: str, interval: str, limit: int) -> List[Dict[str, Any]]:
         "interval": interval,
         "limit": limit,
     }
+    
+    # 如果提供了 start_time，添加到请求参数
+    if start_time is not None:
+        params["startTime"] = int(start_time)
 
     try:
         resp = requests.get(

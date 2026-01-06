@@ -4,14 +4,16 @@
 - 根据 AI JSON 构造完整的 Prompt
 - 使用专门针对缠论分析的提示词模板
 - 强制 AI 输出结构化 JSON，不是自由文本
+- 支持 A2.5 统计提示注入
 """
 import json
 from typing import Dict, Any
 from ai_output_schema import get_schema_template
+from stat_hint import get_stat_hint
 
 
 def build_structured_prompt(ai_json: Dict[str, Any]) -> str:
-    """构造结构化输出 Prompt（强制 JSON 输出）
+    """构造结构化输出 Prompt（强制 JSON 输出，含 A2.5 统计提示）
     
     参数：
     - ai_json: 符合规范的 AI 输入 JSON
@@ -23,39 +25,85 @@ def build_structured_prompt(ai_json: Dict[str, Any]) -> str:
     json_str = json.dumps(ai_json, ensure_ascii=False, indent=2)
     schema = get_schema_template()
     
-    return f"""你是一个【缠论结构分析引擎】，不是聊天机器人。
-
-你的任务：
-- 只能根据提供的缠论结构数据进行分析
-- 严格按照指定 JSON Schema 输出
-- 不允许输出任何解释性文字、免责声明、建议、段落说明
+    meta = ai_json.get("meta", {})
+    market = ai_json.get("market", {})
+    symbol = meta.get("symbol", "Unknown")
+    interval = meta.get("interval", "Unknown")
+    latest_price = float(market.get("latest_price", 0.0))
+    
+    # 计算当前结构是否在中枢内（用于 A2.5 统计提示）
+    in_zs = False
+    sj = ai_json.get("structure_judgement", {})
+    zs = sj.get("zs", {})
+    zs_range = zs.get("range") or []
+    if isinstance(zs_range, list) and len(zs_range) == 2:
+        try:
+            low, high = float(zs_range[0]), float(zs_range[1])
+            in_zs = low <= latest_price <= high
+        except Exception:
+            in_zs = False
+    
+    # === A2.5 统计提示 ===
+    stat = get_stat_hint(symbol=symbol, interval=interval, in_zs=in_zs)
+    win_rate_str = (
+        f"{stat['win_rate']}" if stat.get("win_rate") is not None else "N/A"
+    )
+    pos_label = "中枢内" if in_zs else "中枢外"
+    
+    stat_block = f"""
+【统计提示 A2.5｜仅供参考】
+交易对：{symbol}，周期：{interval}，结构位置：{pos_label}
+样本数量：{stat["sample"]}
+历史胜率：{win_rate_str}
+结论：{stat["hint"]}
+"""
+    
+    # === 系统约束（强约束） ===
+    system_block = """
+【系统约束】
+你是一个【缠论结构分析引擎】，不是聊天机器人。
+你只能基于给定的缠论结构 JSON 进行分析。
+【统计提示】仅用于背景参考，不得作为结论依据，不得反向推理。
 
 【严禁事项】
 - 禁止使用技术指标（均线、MACD、RSI 等）
 - 禁止引入外部行情、消息、情绪
 - 禁止超出提供数据进行推断
-- 禁止输出 schema 之外的字段
+- 禁止输出 Schema 之外的字段
+"""
+    
+    # === 缠论结构 JSON ===
+    structure_block = f"""
+【缠论结构 JSON】
+{json_str}
+"""
+    
+    # === 输出格式约束（含 JSON Schema） ===
+    output_block = f"""
+【输出格式约束】
+1. 必须输出一个合法 JSON，严格符合下方 JSON Schema。
+2. 不得复述或引用【统计提示】中的任何数字或文字。
+3. 不得使用“因为历史胜率…”等基于统计的表述。
+4. 字段名、层级、类型必须完全一致；数值使用 number，概率 0~1。
+5. 不允许出现 markdown 代码块标记，不允许多余文本。
+6. scenarios 的概率总和应不超过 1.05。
+7. primary_scenario 必须填写，作为最主要场景，字段含义如下：
+   - direction: "up" 或 "down"（不能是 "range"）
+   - target_pct: 目标涨跌幅（正数，如 5.0 表示 5%）
+   - stop_pct: 止损幅度（正数，如 2.0 表示 2%）
+   - probability: 0~1 之间
+   - trigger: 触发条件
+   - reasoning: 逻辑推导
 
-【输出要求】
-- 输出必须是一个合法 JSON
-- 字段名、层级、类型必须完全一致
-- 数值使用 number，概率 0~1
-- 不允许出现 markdown 代码块标记
-- 不允许出现多余文本
-- scenarios 的概率总和应接近 1.0
-
-【必须严格遵守的 JSON Schema】
+【JSON Schema】
 ```json
 {schema}
 ```
 
-【缠论结构数据】
-```json
-{json_str}
-```
-
 请直接输出符合 Schema 的 JSON，不要有任何其他内容：
 """
+    
+    return system_block + "\n" + stat_block + "\n" + structure_block + "\n" + output_block
 
 
 def build_prompt(ai_json: Dict[str, Any]) -> str:

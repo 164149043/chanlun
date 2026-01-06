@@ -191,7 +191,7 @@ python evaluate_outcome.py 1440
 chanlun_ai/
 ├── ai/                          # AI 调用模块
 │   ├── llm.py                  # LLM 统一接口
-│   └── prompt_builder.py       # Prompt 模板（已废弃）
+│   └── prompt_builder.py       # 结构化/表格 Prompt 构造器
 │
 ├── chanlun_local/              # 缠论计算引擎
 │   ├── engine.py              # 核心计算逻辑
@@ -201,30 +201,113 @@ chanlun_ai/
 │
 ├── 核心业务模块
 │   ├── binance.py             # Binance API 封装
-│   ├── chanlun_adapter.py     # 数据适配器
+│   ├── chanlun_adapter.py     # 数据适配器（K线 → 缠论结构）
 │   ├── chanlun_icl.py         # ICL 接口封装
 │   ├── ai_data_builder.py     # AI 输入数据构建器
-│   ├── chanlun_ai_exporter.py # AI JSON 导出器
-│   ├── ai_output_schema.py    # AI 输出验证
+│   ├── chanlun_ai_exporter.py # 缠论结构 → AI 专用 JSON 导出器
+│   ├── ai_output_schema.py    # AI 输出 JSON Schema 与校验
 │   ├── output_formatter.py    # 终端输出格式化
-│   └── prompt_builder.py      # Prompt 模板构造器
+│   └── prompt_builder.py      # CLI 分析模式 Prompt 构造器（standard/simple/table/structured）
 │
-├── 程序入口
-│   ├── chanlun_ai.py          # 主 CLI 工具
-│   ├── query_stats.py         # 查询统计工具
-│   └── evaluate_outcome.py    # 结果回填脚本
+├── 程序入口与工具
+│   ├── chanlun_ai.py          # 主 CLI 工具（获取行情 + 缠论计算 + 调用 AI）
+│   ├── evaluate_outcome.py    # 预测结果评估脚本（按时间间隔评估未来走势）
+│   ├── query_stats.py         # 快照与结果的快速查询工具
+│   └── stats_report.py        # 研究报告生成器（AI × 缠论结构统计）
 │
 ├── 配置文件
 │   ├── .env                   # 环境变量（不上传）
 │   ├── .env.example           # 配置示例
 │   ├── .gitignore             # Git 忽略规则
-│   ├── config.yaml            # 项目配置
+│   ├── config.yaml            # 项目配置（可选）
 │   └── requirements.txt       # Python 依赖
 │
 └── 文档
     ├── README.md              # 项目说明
     └── COMMANDS.md            # 命令行参数详解
 ```
+
+### 主要脚本作用与使用方法
+
+- **`chanlun_ai.py`**：主分析入口
+  - **作用**：拉取 Binance K 线 → 计算缠论结构 → 构造 Prompt → 调用 AI → 输出分析 / 保存快照
+  - **示例**：
+    - 结构化分析并保存到数据库：
+      ```bash
+      python chanlun_ai.py BTCUSDT 1h --structured --limit 200
+      ```
+    - 表格版 Markdown 分析：
+      ```bash
+      python chanlun_ai.py BTCUSDT 1h --table --limit 200
+      ```
+    - 仅看缠论结构（不调用 AI）：
+      ```bash
+      python chanlun_ai.py BTCUSDT 1h --no-ai
+      ```
+
+- **`evaluate_outcome.py`**：事后评估脚本
+  - **作用**：按时间间隔（分钟）拉取“未来 K 线”，基于统一规则评估预测是否命中，并写回评估结果
+  - **示例**：
+    - 评估 1 小时前的所有快照：
+      ```bash
+      python evaluate_outcome.py 60
+      ```
+    - 评估 4 小时前的所有快照：
+      ```bash
+      python evaluate_outcome.py 240
+      ```
+
+- **`query_stats.py`**：快照/结果快速查看
+  - **作用**：查看最近的分析快照、结果回填记录和简单的准确率统计
+  - **示例**：
+    ```bash
+    # 最近快照
+    python query_stats.py --snapshots
+
+    # 回填结果
+    python query_stats.py --outcomes
+
+    # 准确率汇总
+    python query_stats.py --accuracy
+    ```
+
+- **`stats_report.py`**：研究报告生成器
+  - **作用**：基于已评估的记录（`evaluated = 1`），从 `primary_scenario` + 结构信息中统计：
+    - AI 总体方向胜率
+    - 是否在中枢内的胜率差异
+    - “结构 × AI 方向”组合的胜率
+  - **示例**：
+    ```bash
+    python stats_report.py
+    ```
+
+- **`stats_by_interval.py`**：按周期统计
+  - **作用**：按 `interval` 维度（1m / 5m / 15m / 1h / 4h 等）统计样本数、命中数、止损数和胜率，帮助判断**哪些周期 AI 可信**。
+  - **示例**：
+    ```bash
+    python stats_by_interval.py
+    ```
+
+- **`stats_by_symbol.py`**：按品种统计
+  - **作用**：按 `symbol` 维度（BTC/USDT、ETH/USDT 等）统计胜率，判断 AI 是“通用分析师”还是更擅长某些品种。
+  - **示例**：
+    ```bash
+    python stats_by_symbol.py
+    ```
+
+- **`stat_hint.py`**：A2.5 统计提示模块
+  - **作用**：提供 (symbol, interval, 是否在中枢内/外) 维度的简洁统计提示，不直接参与决策，只用于：
+    - 在 Prompt 中注入【统计提示 A2.5｜仅供参考】
+    - 在 CLI 中展示“样本数 + 胜率 + 文本结论”
+  - **返回结构**：
+    ```python
+    {
+        "sample": int,             # 有效样本数
+        "win_rate": float | None,  # 胜率，样本不足时为 None
+        "level": "high" | "mid" | "low" | "unknown",
+        "hint": str,               # 中文提示文案
+    }
+    ```
 
 ---
 
@@ -271,31 +354,35 @@ DEEPSEEK_API_KEY=sk-your-key
 
 ## 📈 数据库设计
 
-### 表 1: `analysis_snapshot`（分析快照）
+### 表 1: `analysis_snapshot`（分析快照 + 评估结果）
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | id | INTEGER | 主键 |
-| symbol | TEXT | 交易对 |
-| interval | TEXT | 周期 |
-| timestamp | TEXT | 分析时间 |
-| price | REAL | 当时价格 |
+| symbol | TEXT | 交易对（如 BTC/USDT） |
+| interval | TEXT | 周期（如 1h、4h） |
+| timestamp | TEXT | 分析时间（UTC ISO 格式） |
+| price | REAL | 当时价格（入场价） |
 | chanlun_json | TEXT | 完整缠论结构 JSON |
-| ai_json | TEXT | AI 输出 JSON |
-| created_at | TEXT | 创建时间 |
+| ai_json | TEXT | AI 输出 JSON（包含 primary_scenario 等） |
+| created_at | TEXT | 创建时间（UTC） |
+| evaluated | INTEGER | 是否已评估（0=未评估，1=已评估） |
+| outcome_json | TEXT | 评估结果 JSON（hit_target、hit_stop、最大波动等） |
 
-### 表 2: `analysis_outcome`（结果回填）
+### 表 2: `analysis_outcome`（旧版结果回填，当前方案可选）
+
+> 说明：该表为早期方案保留，当前 **方案 A** 主要使用 `analysis_snapshot.outcome_json` 存储评估结果。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | id | INTEGER | 主键 |
 | snapshot_id | INTEGER | 关联快照 ID |
-| check_after_minutes | INTEGER | 评估间隔 |
+| check_after_minutes | INTEGER | 评估间隔（旧方案使用） |
 | future_price | REAL | 未来价格 |
 | max_price | REAL | 期间最高价 |
 | min_price | REAL | 期间最低价 |
 | result_direction | TEXT | 实际方向 |
-| hit_scenario_rank | INTEGER | 命中的 scenario |
+| hit_scenario_rank | INTEGER | 命中的 scenario（旧方案使用） |
 | note | TEXT | 备注 |
 | checked_at | TEXT | 检查时间 |
 
@@ -344,6 +431,16 @@ DEEPSEEK_API_KEY=sk-your-key
 - ✅ 统计报表生成
 - ✅ 按方向/rank/interval 分类统计
 
+### 5. 研究与统计工具
+
+- ✅ `stats_report.py`：输出 AI × 缠论结构的研究报告（总体胜率、中枢内外、结构 × AI 组合）。
+- ✅ `stats_by_interval.py`：按周期维度统计胜率，帮助识别“高价值周期”和“噪音周期”。
+- ✅ `stats_by_symbol.py`：按交易对维度统计胜率，判断 AI 在不同品种上的适用性。
+
+### 6. A2.5 统计提示（仅供参考）
+
+- ✅ `stat_hint.py` 提供 (symbol, interval, 中枢内/外) 维度的历史统计提示，包含样本数、胜率分级（high/mid/low/unknown）和一句话结论。
+- ✅ 结构化模式（`--structured`）的 Prompt 会自动注入【统计提示 A2.5｜仅供参考】，但通过系统约束禁止 AI 直接引用或基于胜率做推理，统计只作用于“人类读者”。
 ---
 
 ## 🛡️ 安全说明
