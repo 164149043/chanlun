@@ -36,8 +36,8 @@
 #### 1. 克隆项目
 
 ```bash
-git clone https://github.com/your-username/chanlun-ai.git
-cd chanlun-ai/chanlun_ai
+git clone https://github.com/164149043/chanlun.git
+cd chanlun
 ```
 
 #### 2. 创建虚拟环境（推荐）
@@ -395,8 +395,8 @@ DEEPSEEK_API_KEY=sk-your-key
 
 ## 📞 联系方式
 
-- **项目主页**：[https://github.com/your-username/chanlun-ai](https://github.com/your-username/chanlun-ai)
-- **问题反馈**：[Issues](https://github.com/your-username/chanlun-ai/issues)
+- **项目主页**：[https://github.com/164149043/chanlun](https://github.com/164149043/chanlun)
+- **问题反馈**：[Issues](https://github.com/164149043/chanlun/issues)
 
 ---
 
