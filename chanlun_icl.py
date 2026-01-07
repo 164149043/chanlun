@@ -1,14 +1,14 @@
-"""chanlun-pro 引擎封装层（ICL 兼容接口）
+"""缠论引擎封装层（ICL 兼容接口）
 
 本模块的目的：
-- 基于 chanlun.engine.ChanLunEngine 提供一个轻量级的 ICL 兼容接口
-- 让上层代码（main.py / test_icl.py）可以用统一的方式调用缠论计算
-- 不修改 chanlun-pro 内部逻辑，只做"薄封装"
+- 基于 chanlun_local.engine.ChanlunEngine 提供一个轻量级的 ICL 兼容接口
+- 让上层代码可以用统一的方式调用缠论计算
+- 不修改引擎内部逻辑，只做"薄封装"
 
 设计原则：
 - 输入：pandas.DataFrame（包含 date/open/high/low/close/volume）
 - 输出：提供 get_bis() / get_xds() / get_bi_zss() 等方法，返回缠论结构对象
-- 透传 chanlun-pro 原始结构，不做额外 JSON 映射
+- 透传原始结构，不做额外 JSON 映射
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from chanlun_local.engine import ChanlunEngine, EngineConfig
 
 
 class ICL:
-    """ICL 兼容接口（基于 ChanLunEngine 的薄封装）
+    """ICL 兼容接口（基于 ChanlunEngine 的薄封装）
     
     用法示例：
         icl = ICL(code="BTC/USDT", frequency="60m", config=None)
