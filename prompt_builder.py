@@ -83,14 +83,18 @@ def build_structured_prompt(ai_json: Dict[str, Any]) -> str:
 【输出格式约束】
 1. 必须输出一个合法 JSON，严格符合下方 JSON Schema。
 2. 不得复述或引用【统计提示】中的任何数字或文字。
-3. 不得使用“因为历史胜率…”等基于统计的表述。
+3. 不得使用"因为历史胜率…"等基于统计的表述。
 4. 字段名、层级、类型必须完全一致；数值使用 number，概率 0~1。
 5. 不允许出现 markdown 代码块标记，不允许多余文本。
 6. scenarios 的概率总和应不超过 1.05。
 7. primary_scenario 必须填写，作为最主要场景，字段含义如下：
    - direction: "up" 或 "down"（不能是 "range"）
    - target_pct: 目标涨跌幅（正数，如 5.0 表示 5%）
+     * 1h周期：建议 1.5-3.0%（BTC）、2.0-4.0%（ETH）
+     * 4h周期：建议 3.0-6.0%（BTC）、4.0-8.0%（ETH）
+     * 1d周期：建议 5.0-10.0%（BTC）、6.0-12.0%（ETH）
    - stop_pct: 止损幅度（正数，如 2.0 表示 2%）
+     * 建议为 target_pct 的 40-60%
    - probability: 0~1 之间
    - trigger: 触发条件
    - reasoning: 逻辑推导
