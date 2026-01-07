@@ -14,7 +14,7 @@
 ### 核心特性
 
 - 🔄 **实时行情获取**：通过 Binance REST API 获取现货 K 线数据
-- 📊 **缠论结构计算**：自动识别笔、线段、中枢、买卖点、背驰等关键结构
+- 📊 **缠论结构计算**：自动识别笔、线段、中枢、买卖点、背驰等关键结构（自实现简化版引擎）
 - 🤖 **AI 智能分析**：支持 DeepSeek、Claude、GPT 等多种 AI 模型进行走势预测
 - 💾 **数据库存储**：SQLite 本地存储，支持历史分析追溯
 - 📈 **准确率统计**：自动回填预测结果，统计 AI 预测准确率
@@ -193,9 +193,9 @@ chanlun/
 │   ├── llm.py                  # LLM 统一接口
 │   └── prompt_builder.py       # 结构化/表格 Prompt 构造器
 │
-├── chanlun_local/              # 缠论计算引擎
-│   ├── engine.py              # 核心计算逻辑
-│   └── mapper.py              # 字段映射工具
+├── chanlun_local/              # 缠论计算引擎（自实现简化版）
+│   ├── engine.py              # 核心计算逻辑（SimpleICL）
+│   └── mapper.py              # 字段映射与 JSON 转换工具
 │
 ├── output/                     # 分析报告输出目录
 │
@@ -391,6 +391,8 @@ DEEPSEEK_API_KEY=sk-your-key
 ## 🎯 功能特性
 
 ### 1. 缠论结构计算
+
+> **说明**：当前使用的是 **自实现的简化版缠论引擎**（`chanlun_local/engine.py` 中的 `SimpleICL`），提供基本的结构识别功能。后续可替换为更完整的缠论算法实现。
 
 - ✅ 笔（Bi）：自动识别向上笔和向下笔
 - ✅ 线段（Segment）：基于笔计算线段
