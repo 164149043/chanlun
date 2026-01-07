@@ -1,8 +1,8 @@
-"""chanlun-pro 适配模块（chanlun_adapter）
+"""缠论适配模块（chanlun_adapter）
 
 本模块的目标：
-- 将来自 Binance 的标准化 K 线数据，转换为 chanlun-pro 可直接使用的“Bar/Kline”结构数据。
-- 严格遵循 chanlun-pro 文档中对原始 K 线对象（Kline）的字段定义：
+- 将来自 Binance 的标准化 K 线数据，转换为缠论引擎可直接使用的 Bar/Kline 结构数据
+- K 线对象的字段定义：
   - date:  K线时间（datetime 对象）
   - o:     开盘价（open）
   - h:     最高价（high）
@@ -11,11 +11,9 @@
   - a:     成交量（volume），若上游未提供则可填 0.0
 
 说明：
-- 这里不进行任何缠论计算，不创建 ICL 对象，仅做“数据形状转换”。
-- 不实现策略、不输出分析，仅返回 Bar 列表，供后续 chanlun-pro 计算使用。
-- 由于 chanlun-pro 中 Kline/CLKline/FX 等对象的具体构造方式在文档中未给出，
-  本模块将 Bar 定义为字段与官方 Kline 一致的 Python dict，
-  这些 dict 可以直接转换为 pandas.DataFrame 再交给 ICL.process_klines 使用。
+- 这里不进行任何缠论计算，不创建 ICL 对象，仅做"数据形状转换"
+- 不实现策略、不输出分析，仅返回 Bar 列表，供后续缠论计算使用
+- Bar 定义为 Python dict，可以直接转换为 pandas.DataFrame 再交给 ICL.process_klines 使用
 """
 from __future__ import annotations
 
@@ -24,7 +22,7 @@ from datetime import datetime
 from typing import Any, Dict, List
 
 
-# 为了兼容文档中“Bar / Kline”的概念，这里将 Bar 定义为一个具有固定字段的字典：
+# 为了兼容 Bar / Kline 的概念，这里将 Bar 定义为一个具有固定字段的字典：
 # - date: datetime
 # - o/h/l/c: float
 # - a: float (volume)
@@ -116,7 +114,7 @@ def _parse_binance_bar(item: Dict[str, Any]) -> BinanceBar:
 
 
 def convert_to_chanlun_bars(klines: List[Dict[str, Any]]) -> List[Bar]:
-    """将 Binance K 线数据转换为 chanlun-pro 可用的 Bar 列表
+    """将 Binance K 线数据转换为缠论引擎可用的 Bar 列表
 
     参数：
     - klines: 来自 Binance 模块标准化后的 K 线列表，每个元素包含：
@@ -130,7 +128,7 @@ def convert_to_chanlun_bars(klines: List[Dict[str, Any]]) -> List[Bar]:
       }
 
     返回：
-    - List[Bar]，每个 Bar 的字段与 chanlun-pro 文档中的 Kline 一致：
+    - List[Bar]，每个 Bar 的字段定义：
       {
         "date": datetime,  # 使用 open_time 作为 K 线时间
         "o": float,
@@ -156,7 +154,7 @@ def convert_to_chanlun_bars(klines: List[Dict[str, Any]]) -> List[Bar]:
     # 2. 按 open_time 升序排序，确保时间顺序正确
     bars.sort(key=lambda b: b.open_time)
 
-    # 3. 映射为 chanlun-pro 风格的 Bar（Kline 字典）
+    # 3. 映射为 Bar 字典
     result: List[Bar] = []
     for b in bars:
         bar: Bar = {
