@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Dict, List
+import time
 
 import requests
 
@@ -28,7 +29,7 @@ _BASE_URL = "https://api.binance.com"
 _KLINES_PATH = "/api/v3/klines"
 
 
-def get_klines(symbol: str, interval: str, limit: int, start_time: int = None) -> List[Dict[str, Any]]:
+def get_klines(symbol: str, interval: str, limit: int, start_time: int = None, max_retries: int = 3) -> List[Dict[str, Any]]:
     """从 Binance 获取指定交易对与周期的历史 K 线数据
 
     参数：
@@ -36,6 +37,7 @@ def get_klines(symbol: str, interval: str, limit: int, start_time: int = None) -
     - interval:   K 线周期，例如 "1m"、"5m"、"15m"、"1h"、"4h"、"1d" 等。
     - limit:      返回的 K 线数量上限（1-1000）。
     - start_time: 开始时间（毫秒时间戳），可选。如果提供，将从该时间开始获取 K 线。
+    - max_retries: 最大重试次数，默认 3 次。
 
     返回：
     - List[dict]，每个元素的结构严格为：
@@ -50,6 +52,7 @@ def get_klines(symbol: str, interval: str, limit: int, start_time: int = None) -
 
     行为约束：
     - 使用 requests 访问 Binance REST API；
+    - 自动重试网络错误（最多 max_retries 次）；
     - 不做任何技术分析；
     - 不做任何数据裁剪（完全返回接口数据）；
     - 返回结果按时间升序排列；
@@ -67,29 +70,52 @@ def get_klines(symbol: str, interval: str, limit: int, start_time: int = None) -
     if start_time is not None:
         params["startTime"] = int(start_time)
 
-    try:
-        resp = requests.get(
-            _BASE_URL + _KLINES_PATH,
-            params=params,
-            timeout=10,
-        )
-    except requests.RequestException as exc:
-        # 网络层异常（超时、连接失败等）直接向上抛出封装后的错误
-        raise RuntimeError(f"请求 Binance K 线数据失败（网络错误）：{exc}") from exc
+    # 重试机制
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(
+                _BASE_URL + _KLINES_PATH,
+                params=params,
+                timeout=10,
+            )
+            
+            if not resp.ok:
+                raise RuntimeError(
+                    f"请求 Binance K 线数据失败，HTTP 状态码 {resp.status_code}，响应内容：{resp.text}"
+                )
 
-    if not resp.ok:
-        raise RuntimeError(
-            f"请求 Binance K 线数据失败，HTTP 状态码 {resp.status_code}，响应内容：{resp.text}"
-        )
+            try:
+                data = resp.json()
+            except ValueError as exc:
+                raise RuntimeError(f"Binance K 线接口返回的不是合法 JSON：{resp.text}") from exc
 
-    try:
-        data = resp.json()
-    except ValueError as exc:
-        raise RuntimeError(f"Binance K 线接口返回的不是合法 JSON：{resp.text}") from exc
+            if not isinstance(data, list):
+                raise RuntimeError(f"Binance K 线接口返回格式异常，预期为列表，实际为：{data}")
 
-    if not isinstance(data, list):
-        raise RuntimeError(f"Binance K 线接口返回格式异常，预期为列表，实际为：{data}")
-
+            # 成功获取数据，跳出重试循环
+            break
+            
+        except requests.exceptions.SSLError as exc:
+            # SSL 错误，尝试重试
+            last_error = exc
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt  # 指数退避：1s, 2s, 4s
+                time.sleep(wait_time)
+                continue
+            else:
+                # 最后一次重试失败，抛出错误
+                raise RuntimeError(f"请求 Binance K 线数据失败（SSL错误，已重试{max_retries}次）：{exc}") from exc
+                
+        except requests.RequestException as exc:
+            # 其他网络层异常（超时、连接失败等）
+            last_error = exc
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt
+                time.sleep(wait_time)
+                continue
+            else:
+                raise RuntimeError(f"请求 Binance K 线数据失败（网络错误，已重试{max_retries}次）：{exc}") from exc
     results: List[Dict[str, Any]] = []
 
     # Binance /api/v3/klines 返回的每一项为：
