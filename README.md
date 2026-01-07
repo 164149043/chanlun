@@ -188,7 +188,7 @@ python evaluate_outcome.py 1440
 ## 🏗️ 项目架构
 
 ```
-chanlun_ai/
+chanlun/
 ├── ai/                          # AI 调用模块
 │   ├── llm.py                  # LLM 统一接口
 │   └── prompt_builder.py       # 结构化/表格 Prompt 构造器
@@ -371,7 +371,7 @@ DEEPSEEK_API_KEY=sk-your-key
 
 ### 表 2: `analysis_outcome`（旧版结果回填，当前方案可选）
 
-> 说明：该表为早期方案保留，当前 **方案 A** 主要使用 `analysis_snapshot.outcome_json` 存储评估结果。
+> 说明：该表为早期方案保留，当前 **方案 A** 主要使用 `analysis_snapshot.outcome_json` 存储评估结果，`evaluate_outcome.py` 与 `query_stats.py` 默认只依赖该字段与 `evaluated` 标记。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|

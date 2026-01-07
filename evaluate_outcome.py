@@ -32,7 +32,7 @@ from binance import get_klines
 # ============================================
 
 DB_PATH = Path(__file__).parent / "chanlun_ai.db"
-FUTURE_BARS = 50  # 观察未来 50 根 K 线
+FUTURE_BARS = 10  # 观察未来 10 根 K 线
 
 
 # ============================================
@@ -80,7 +80,7 @@ def evaluate_outcome(ai_json: dict, future_klines: List[Dict[str, Any]], entry_p
     
     参数：
     - ai_json: AI 输出的结构化 JSON
-    - future_klines: 未来 K 线列表（至少 50 根）
+    - future_klines: 未来 K 线列表（至少 10 根）
     - entry_price: 入场价格（分析时的价格）
     
     返回：

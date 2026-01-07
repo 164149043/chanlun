@@ -270,11 +270,10 @@ DEFAULT_KLINE_LIMIT=200   # 默认K线数量
 
 ### setup_scheduler.ps1 - 一键创建定时任务
 
-- **作用**：在 Windows 任务计划程序中，自动创建 4 个定时任务，用来定期运行分析和评估：
-  - `ChanLun-AI-1h-Analysis`：每小时运行一次 `chanlun_ai.py BTCUSDT 1h --structured --limit 500`
-  - `ChanLun-AI-1h-Evaluate`：每小时运行一次 `evaluate_outcome.py 60`
-  - `ChanLun-AI-4h-Analysis`：每 4 小时运行一次 `chanlun_ai.py BTCUSDT 4h --structured --limit 400`
-  - `ChanLun-AI-4h-Evaluate`：每 4 小时运行一次 `evaluate_outcome.py 240`
+- **作用**：在 Windows 任务计划程序中,自动创建 3 个定时任务,用来定期运行分析和评估:
+  - `ChanLun-AI-BTC-1h-Analysis`:每小时运行一次 `chanlun_ai.py BTCUSDT 1h --structured --limit 500`
+  - `ChanLun-AI-1h-Evaluate`:每小时运行一次 `evaluate_outcome.py 60`(评估所有交易对的 60 分钟前快照)
+  - `ChanLun-AI-ETH-1h-Analysis`:每小时运行一次 `chanlun_ai.py ETHUSDT 1h --structured --limit 500`
 
 ### 使用前准备
 
@@ -282,13 +281,13 @@ DEFAULT_KLINE_LIMIT=200   # 默认K线数量
    - 如果你使用项目自带的虚拟环境：
      - 确保已经创建虚拟环境并安装依赖：
        ```bash
-       cd chanlun_ai
+       cd chanlun
        python -m venv venv
        venv\Scripts\pip install -r requirements.txt
        ```
      - 保持 `setup_scheduler.ps1` 中：
        ```powershell
-       $ProjectPath = "C:\Users\16414\Desktop\Qoder\Chanlun\chanlun_ai"
+       $ProjectPath = "C:\Users\16414\Desktop\Qoder\chanlun"
        $PythonExe   = "$ProjectPath\venv\Scripts\python.exe"
        ```
    - 如果你使用全局 Python：
@@ -305,7 +304,7 @@ DEFAULT_KLINE_LIMIT=200   # 默认K线数量
 ```powershell
 # 1. 打开 PowerShell（建议使用 PowerShell 7）
 # 2. 切换到脚本所在目录
-cd C:\Users\16414\Desktop\Qoder\Chanlun\chanlun_ai
+cd C:\Users\16414\Desktop\Qoder\chanlun
 
 # 3. 如果第一次运行脚本，可能需要临时放宽执行策略（只对当前进程生效）：
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
@@ -319,24 +318,24 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 - **查看任务**：
   - 在开始菜单中打开：`任务计划程序 (taskschd.msc)`，在“任务计划程序库”里找到 `ChanLun-AI-*` 开头的任务。
 
-- **手动运行任务测试**（PowerShell）：
+- **手动运行任务测试**(PowerShell):
   ```powershell
-  Start-ScheduledTask -TaskName "ChanLun-AI-1h-Analysis"
+  Start-ScheduledTask -TaskName "ChanLun-AI-BTC-1h-Analysis"
   Start-ScheduledTask -TaskName "ChanLun-AI-1h-Evaluate"
+  Start-ScheduledTask -TaskName "ChanLun-AI-ETH-1h-Analysis"
   ```
 
-- **删除任务**（如果不再需要自动运行）：
+- **删除任务**(如果不再需要自动运行):
   ```powershell
-  Unregister-ScheduledTask -TaskName "ChanLun-AI-1h-Analysis" -Confirm:$false
+  Unregister-ScheduledTask -TaskName "ChanLun-AI-BTC-1h-Analysis" -Confirm:$false
   Unregister-ScheduledTask -TaskName "ChanLun-AI-1h-Evaluate" -Confirm:$false
-  Unregister-ScheduledTask -TaskName "ChanLun-AI-4h-Analysis" -Confirm:$false
-  Unregister-ScheduledTask -TaskName "ChanLun-AI-4h-Evaluate" -Confirm:$false
+  Unregister-ScheduledTask -TaskName "ChanLun-AI-ETH-1h-Analysis" -Confirm:$false
   ```
 
 > 提示：如果计划任务创建后没有跑起来，可以检查：
 > - `$PythonExe` 路径是否正确
 > - `venv` 是否存在、依赖是否安装
-> - 任务的“起始于”目录是否为 `chanlun_ai`（脚本里已通过 `-WorkingDirectory` 设置）
+- 任务的"起始于"目录是否为 `chanlun`（脚本里已通过 `-WorkingDirectory` 设置）
 
 ### Q1: 如何避免超时？
 **A**: 减少 K 线数量

@@ -45,87 +45,76 @@ def query_snapshots(limit: int = 10):
 
 
 def query_outcomes(limit: int = 10):
-    """查询最近的结果回填记录"""
+    """查询最近的结果回填记录（基于 analysis_snapshot.outcome_json）"""
     conn = get_db_conn()
     c = conn.cursor()
     
-    c.execute("""
-        SELECT o.id, s.symbol, s.interval, o.check_after_minutes,
-               s.price as start_price, o.future_price,
-               o.result_direction, o.hit_scenario_rank,
-               o.checked_at
-        FROM analysis_outcome o
-        JOIN analysis_snapshot s ON o.snapshot_id = s.id
-        ORDER BY o.checked_at DESC
+    c.execute(
+        """
+        SELECT id, symbol, interval, timestamp, price, outcome_json
+        FROM analysis_snapshot
+        WHERE evaluated = 1 AND outcome_json IS NOT NULL
+        ORDER BY timestamp DESC
         LIMIT ?
-    """, (limit,))
+        """,
+        (limit,),
+    )
     
     rows = c.fetchall()
     conn.close()
     
     return rows
 
-
 def calculate_accuracy():
-    """计算 AI 预测准确率统计"""
+    """计算 AI 预测准确率统计（基于 analysis_snapshot.outcome_json）"""
     conn = get_db_conn()
     c = conn.cursor()
     
-    # 总体准确率
-    c.execute("""
-        SELECT 
-            COUNT(*) as total,
-            SUM(CASE WHEN hit_scenario_rank IS NOT NULL THEN 1 ELSE 0 END) as hit_count
-        FROM analysis_outcome
-    """)
-    total, hit_count = c.fetchone()
-    
-    # 按时间间隔统计
-    c.execute("""
-        SELECT 
-            check_after_minutes,
-            COUNT(*) as total,
-            SUM(CASE WHEN hit_scenario_rank IS NOT NULL THEN 1 ELSE 0 END) as hit_count,
-            ROUND(AVG(CASE WHEN hit_scenario_rank IS NOT NULL THEN 1.0 ELSE 0.0 END) * 100, 2) as accuracy
-        FROM analysis_outcome
-        GROUP BY check_after_minutes
-        ORDER BY check_after_minutes
-    """)
-    by_interval = c.fetchall()
-    
-    # 按命中的 rank 统计
-    c.execute("""
-        SELECT 
-            hit_scenario_rank,
-            COUNT(*) as count
-        FROM analysis_outcome
-        WHERE hit_scenario_rank IS NOT NULL
-        GROUP BY hit_scenario_rank
-        ORDER BY hit_scenario_rank
-    """)
-    by_rank = c.fetchall()
-    
-    # 按走势方向统计
-    c.execute("""
-        SELECT 
-            result_direction,
-            COUNT(*) as count,
-            SUM(CASE WHEN hit_scenario_rank IS NOT NULL THEN 1 ELSE 0 END) as hit_count
-        FROM analysis_outcome
-        GROUP BY result_direction
-    """)
-    by_direction = c.fetchall()
-    
+    c.execute(
+        """
+        SELECT outcome_json
+        FROM analysis_snapshot
+        WHERE evaluated = 1 AND outcome_json IS NOT NULL
+        """
+    )
+    rows = c.fetchall()
     conn.close()
     
+    import json
+    
+    total = 0
+    hit_count = 0
+    by_direction_map = {}
+    
+    for (outcome_json_str,) in rows:
+        try:
+            outcome = json.loads(outcome_json_str)
+        except Exception:
+            continue
+        
+        total += 1
+        direction = outcome.get("direction", "unknown")
+        hit_target = outcome.get("hit_target", False)
+        
+        if hit_target:
+            hit_count += 1
+        
+        stats = by_direction_map.setdefault(direction, {"total": 0, "hit": 0})
+        stats["total"] += 1
+        if hit_target:
+            stats["hit"] += 1
+    
+    by_direction = []
+    for direction, stats in by_direction_map.items():
+        by_direction.append((direction, stats["total"], stats["hit"]))
+    
     return {
-        "total": total or 0,
-        "hit_count": hit_count or 0,
-        "by_interval": by_interval,
-        "by_rank": by_rank,
+        "total": total,
+        "hit_count": hit_count,
+        "by_interval": [],
+        "by_rank": [],
         "by_direction": by_direction,
     }
-
 
 def print_snapshots(limit: int = 10):
     """打印快照列表"""
@@ -146,20 +135,31 @@ def print_snapshots(limit: int = 10):
 
 
 def print_outcomes(limit: int = 10):
-    """打印结果列表"""
+    """打印结果列表（基于 analysis_snapshot.outcome_json）"""
     print("\n📊 最近的结果回填")
     print("=" * 110)
-    print(f"{'ID':<6} {'交易对':<12} {'周期':<8} {'间隔':<8} {'起始价':<10} {'未来价':<10} {'方向':<8} {'命中':<8} {'检查时间'}")
+    print(f"{'ID':<6} {'交易对':<12} {'周期':<8} {'K线数':<8} {'起始价':<10} {'最高价':<10} {'最低价':<10} {'方向':<8} {'命中目标':<8}")
     print("-" * 110)
     
     rows = query_outcomes(limit)
     if not rows:
         print("（暂无数据）")
     else:
+        import json
         for row in rows:
-            out_id, symbol, interval, check_min, start_price, future_price, direction, hit_rank, checked_at = row
-            hit_str = f"Rank {hit_rank}" if hit_rank else "未命中"
-            print(f"{out_id:<6} {symbol:<12} {interval:<8} {check_min:<8} {start_price:<10.2f} {future_price:<10.2f} {direction:<8} {hit_str:<8} {checked_at}")
+            snapshot_id, symbol, interval, timestamp, price, outcome_json_str = row
+            try:
+                outcome = json.loads(outcome_json_str)
+            except Exception:
+                outcome = {}
+            direction = outcome.get("direction", "unknown")
+            evaluated_bars = outcome.get("evaluated_bars", 0)
+            entry_price = outcome.get("entry_price", price)
+            max_high = outcome.get("max_high", entry_price)
+            min_low = outcome.get("min_low", entry_price)
+            hit_target = outcome.get("hit_target", False)
+            hit_str = "是" if hit_target else "否"
+            print(f"{snapshot_id:<6} {symbol:<12} {interval:<8} {evaluated_bars:<8} {entry_price:<10.2f} {max_high:<10.2f} {min_low:<10.2f} {direction:<8} {hit_str:<8}")
     
     print()
 
