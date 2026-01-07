@@ -2,16 +2,15 @@
 
 本模块当前主要职责：
 - 将 Binance REST API 获取到的 K 线数据，转换为 `engine.KlineInput` 序列
-- 严格遵守你定义的 Binance 行情规则：
+- 严格遵守定义的 Binance 行情规则：
   - 只使用 open_time / open / high / low / close / close_time 这 6 个字段
   - 不使用 volume / trade_num / quote_volume
-  - 按固定周期映射表，将 Binance interval 映射为 chanlun-pro 的 frequency
+  - 按固定周期映射表，将 Binance interval 映射为缠论引擎的 frequency
   - 按推荐数量拉取 K 线，保证足够的历史结构
 
 说明：
-- 这里先实现「Binance → 内部 K 线结构」的映射逻辑；
-- 至于「chanlun-pro 结构对象 → 你定义的标准 JSON」，还需要你给出最终的 JSON 字段规则，
-  才能做到“严格按规则实现，不得新增字段”。在那之前，本文件不会臆造任何 JSON 结构。
+- 实现「Binance → 内部 K 线结构」的映射逻辑
+- 提供缠论结构对象 → JSON 的转换函数
 """
 from __future__ import annotations
 
@@ -222,7 +221,7 @@ def mmd_to_json(m: Any) -> Dict[str, Any]:
 
 
 def icl_to_standard_json(icl: Any) -> Dict[str, Any]:
-    """将 chanlun-pro 的 ICL 对象映射为标准 JSON 结构
+    """将缠论引擎的 ICL 对象映射为标准 JSON 结构
 
     顶层结构：
 
@@ -313,9 +312,9 @@ class BinanceKline:
     """内部使用的 Binance K 线最小结构
 
     说明：
-    - 仅保留你指定的 6 个字段；不引入 volume / trade_num / quote_volume。
-    - open_time / close_time 使用毫秒时间戳，保持与 Binance REST 返回一致，
-      真正喂给 chanlun-pro 时只会用 open_time 转换为 datetime，作为 K 线时间。
+    - 仅保留指定的 6 个字段；不引入 volume / trade_num / quote_volume
+    - open_time / close_time 使用毫秒时间戳，保持与 Binance REST 返回一致
+    - 传给缠论引擎时只会用 open_time 转换为 datetime，作为 K 线时间
     """
 
     open_time: int  # 毫秒时间戳
@@ -327,7 +326,7 @@ class BinanceKline:
 
 
 def binance_interval_to_chanlun(interval: str) -> str:
-    """将 Binance 的 interval 映射为 chanlun-pro 的 frequency
+    """将 Binance 的 interval 映射为缠论引擎的 frequency
 
     若传入了未在映射表中的 interval，将抛出 ValueError，
     避免出现周期命名混乱的问题。
@@ -340,12 +339,12 @@ def binance_interval_to_chanlun(interval: str) -> str:
 
 
 def get_recommended_limit_by_frequency(frequency: str) -> int:
-    """根据 chanlun-pro 周期获取推荐 K 线数量
+    """根据缠论引擎周期获取推荐 K 线数量
 
     说明：
-    - 这里使用的是你给出的「推荐值（稳定）」表；
-    - 若传入的 frequency 未在表中，则抛出异常，提醒调用方显式处理。
-    - 该函数不会直接发起请求，只提供一个统一的推荐值查询入口。
+    - 这里使用的是「推荐值（稳定）」表
+    - 若传入的 frequency 未在表中，则抛出异常，提醒调用方显式处理
+    - 该函数不会直接发起请求，只提供一个统一的推荐值查询入口
     """
 
     try:
@@ -358,7 +357,7 @@ def parse_binance_kline_item(item: Any) -> BinanceKline:
     """将单条 Binance K 线记录解析为 BinanceKline 对象
 
     支持两种常见形式：
-    1. 字典形式（你示例中的 JSON 对象）：
+    1. 字典形式：
        {
          "open_time": 1703721600000,
          "open": 87442.08,
@@ -374,7 +373,7 @@ def parse_binance_kline_item(item: Any) -> BinanceKline:
          number_of_trades, taker_buy_base, taker_buy_quote, ignore
        ]
        在这种情况下，我们只读取前 5 个字段 + 第 7 个 close_time，
-       其余 volume / 交易次数等字段全部忽略。
+       其余 volume / 交易次数等字段全部忽略
     """
 
     # 情况一：字典形式
@@ -420,9 +419,9 @@ def normalize_binance_klines(klines: Iterable[Any]) -> List[Dict[str, Any]]:
       }
 
     关键约束：
-    - 不做任何技术计算，仅做字段映射与时间格式转换；
-    - 不做增量更新，每次视为全量历史数据；
-    - 调用方需确保 limit 足够大以支持缠论结构计算。
+    - 不做任何技术计算，仅做字段映射与时间格式转换
+    - 不做增量更新，每次视为全量历史数据
+    - 调用方需确保 limit 足够大以支持缠论结构计算
     """
 
     result: List[Dict[str, Any]] = []
@@ -453,15 +452,15 @@ def binance_klines_to_kline_inputs(klines: Iterable[Any]) -> List[KlineInput]:
     """将 Binance K 线序列转换为 engine.KlineInput 序列
 
     关键规则：
-    - 只使用 open_time / open / high / low / close / close_time 6 个字段；
-    - 不使用 volume / trade_num / quote_volume 等量能相关字段；
-    - K 线时间使用 open_time（毫秒）转换为 UTC datetime；
-    - 因 chanlun-pro 的 ICL 仍要求存在 volume 列，这里统一填充为 0.0，
-      表示“无量能信息，仅做结构分析”。
+    - 只使用 open_time / open / high / low / close / close_time 6 个字段
+    - 不使用 volume / trade_num / quote_volume 等量能相关字段
+    - K 线时间使用 open_time（毫秒）转换为 UTC datetime
+    - 因缠论引擎的 ICL 仍要求存在 volume 列，这里统一填充为 0.0，
+      表示"无量能信息，仅做结构分析"。
 
     返回：
-    - 已按输入顺序构造好的 KlineInput 列表；
-      本函数不会对顺序进行重新排序，也不会裁剪数量。
+    - 已按输入顺序构造好的 KlineInput 列表
+      本函数不会对顺序进行重新排序，也不会裁剪数量
     """
 
     result: List[KlineInput] = []
@@ -470,7 +469,7 @@ def binance_klines_to_kline_inputs(klines: Iterable[Any]) -> List[KlineInput]:
         bk = parse_binance_kline_item(raw)
 
         # 将毫秒时间戳转换为 datetime 对象
-        # 使用 UTC 时区，后续如需本地化，可在展示层处理。
+        # 使用 UTC 时区，后续如需本地化，可在展示层处理
         dt = datetime.fromtimestamp(bk.open_time / 1000.0, tz=timezone.utc)
 
         k = KlineInput(
