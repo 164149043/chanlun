@@ -240,9 +240,9 @@ class SimpleICL:
         self.config = config
         
         # 算法参数（从 config 中读取，或使用默认值）
-        self.bi_min_kline = config.get('bi_min_kline', 5)
-        self.xd_min_bi = config.get('xd_min_bi', 3)
-        self.zs_min_bi = config.get('zs_min_bi', 3)
+        self.bi_min_kline = config.get('bi_min_kline', 5)  # 笔的最小 K 线数量
+        self.xd_min_bi = config.get('xd_min_bi', 3)  # 线段的最小笔数量
+        self.zs_min_bi = config.get('zs_min_bi', 3)  # 中枢的最小笔数量
         
         # 缠论结构结果
         self._bis: List[SimpleBi] = []
@@ -438,14 +438,18 @@ class SimpleICL:
         return xds
     
     def _calculate_zs(self, items: List[Any], level: str) -> List[SimpleZS]:
-        """计算中枢（优化版）
+        """计算中枢（修复版）
         
         缠论中枢定义：
         - 至少 3 个连续的笔/线段有重叠区间
-        - zg (中枢高点): 前 3 个项中最低的高点
-        - zd (中枢低点): 前 3 个项中最高的低点
-        - gg (高高点): 中枢内所有项的最高点
-        - dd (低低点): 中枢内所有项的最低点
+        - 中枢是笔的「结束价」的重叠区间
+        - 对于笔：
+          - 上笔：从 start_price(低) 到 end_price(高)
+          - 下笔：从 start_price(高) 到 end_price(低)
+        - zg (中枢高点): 前 3 个笔的最低的顶部
+        - zd (中枢低点): 前 3 个笔的最高的底部
+        - gg (高高点): 中枢内所有笔的最高点
+        - dd (低低点): 中枢内所有笔的最低点
         """
         if len(items) < self.zs_min_bi:
             return []
@@ -454,13 +458,26 @@ class SimpleICL:
         zs_index = 0
         i = 0
         
+        def get_bi_range(bi: Any) -> tuple:
+            """获取笔的价格区间（低点、高点）"""
+            if bi.type == "up":
+                # 上笔：从低到高
+                return (bi.start_price, bi.end_price)
+            else:
+                # 下笔：从高到低
+                return (bi.end_price, bi.start_price)
+        
         while i < len(items) - self.zs_min_bi + 1:
             # 取连续 3 个项作为中枢的起始项
             group = items[i:i + self.zs_min_bi]
             
-            # 计算重叠区间
-            highs = [item.high for item in group]
-            lows = [item.low for item in group]
+            # 计算重叠区间（使用笔的价格区间）
+            ranges = [get_bi_range(item) for item in group]
+            
+            # 中枢高点 zg：所有笔的最低的高点
+            # 中枢低点 zd：所有笔的最高的低点
+            lows = [r[0] for r in ranges]
+            highs = [r[1] for r in ranges]
             
             zg = min(highs)  # 中枢高点：最低的高点
             zd = max(lows)   # 中枢低点：最高的低点
@@ -473,20 +490,24 @@ class SimpleICL:
                 
                 while j < len(items):
                     next_item = items[j]
+                    next_low, next_high = get_bi_range(next_item)
+                    
                     # 检查下一项是否与中枢重叠
-                    if next_item.low <= zg and next_item.high >= zd:
+                    if next_low <= zg and next_high >= zd:
                         zs_items.append(next_item)
                         j += 1
                     else:
                         break
                 
                 # 计算最终的 zg, zd, gg, dd
-                all_highs = [item.high for item in zs_items]
-                all_lows = [item.low for item in zs_items]
+                all_ranges = [get_bi_range(item) for item in zs_items]
+                all_lows = [r[0] for r in all_ranges]
+                all_highs = [r[1] for r in all_ranges]
                 
                 # 重新计算 zg, zd (使用前 3 项)
-                first_three_highs = [item.high for item in zs_items[:3]]
-                first_three_lows = [item.low for item in zs_items[:3]]
+                first_three_ranges = all_ranges[:3]
+                first_three_lows = [r[0] for r in first_three_ranges]
+                first_three_highs = [r[1] for r in first_three_ranges]
                 zg = min(first_three_highs)
                 zd = max(first_three_lows)
                 
