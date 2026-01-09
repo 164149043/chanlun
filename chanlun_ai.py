@@ -8,11 +8,13 @@
     python chanlun_ai.py BTCUSDT 1h --simple     # 快速分析（简化Prompt）
     python chanlun_ai.py BTCUSDT 1h --table      # 表格格式输入（输出Markdown）
     python chanlun_ai.py BTCUSDT 1h --structured # 强制JSON输出
+    python chanlun_ai.py BTCUSDT 1h --stats      # 分析后显示统计信息
 
 示例:
     python chanlun_ai.py BTCUSDT 1h
     python chanlun_ai.py ETHUSDT 4h --save
     python chanlun_ai.py BTCUSDT 1h --table
+    python chanlun_ai.py BTCUSDT 1h --stats      # 分析并显示准确率统计
 """
 import argparse
 import json
@@ -35,6 +37,15 @@ from prompt_builder import build_prompt, build_simple_prompt, build_structured_p
 from output_formatter import format_cli_output
 from ai.llm import call_ai
 from ai_output_schema import validate_ai_output
+
+# 导入统计模块
+try:
+    from query_stats import calculate_accuracy, print_accuracy
+    from stats_formatter import format_stats_for_prompt, get_stats_summary
+    from prediction_validator import validate_prediction, get_adjustment_summary, should_skip_prediction
+    STATS_AVAILABLE = True
+except ImportError:
+    STATS_AVAILABLE = False
 
 
 # ============================================
@@ -282,6 +293,12 @@ def parse_args():
         help="仅显示缠论结构，不调用AI分析"
     )
     
+    parser.add_argument(
+        "--stats",
+        action="store_true",
+        help="分析完成后显示统计信息"
+    )
+    
     return parser.parse_args()
 
 
@@ -455,6 +472,32 @@ def main():
     print(f"   Temperature: {temperature}")
     print(f"   Max Tokens: {max_tokens}")
     
+    # ========================================
+    # 4.5. 获取历史统计数据（新增）
+    # ========================================
+    # 在外层定义变量，确保作用域可见
+    stats_context = ""
+    stats_summary = None
+    use_structured = args.structured  # 提前定义 use_structured
+    
+    if STATS_AVAILABLE:
+        try:
+            print("\n" + "=" * 60)
+            print("📈 步骤 4.5/6: 获取历史统计数据...")
+            print("=" * 60)
+            
+            stats = calculate_accuracy()
+            if stats and stats.get("total", 0) > 0:
+                stats_context = format_stats_for_prompt(stats, display_symbol, interval)
+                stats_summary = get_stats_summary(stats)
+                print(f"   ✓ 已加载 {stats['total']} 条历史记录")
+                print(f"   ✓ 整体命中率: {stats_summary['accuracy']:.1f}%")
+                print(f"   ✓ 平均得分: {stats_summary['avg_score']:.2f} / 1.0")
+            else:
+                print("   ⚠️  暂无历史数据")
+        except Exception as e:
+            print(f"   ⚠️  统计数据加载失败: {e}")
+    
     try:
         # 构造 Prompt
         if args.structured and args.table:
@@ -463,8 +506,11 @@ def main():
             print("   📊 使用表格格式 Prompt + 强制 JSON 输出...")
             use_structured = True
         elif args.structured:
-            prompt = build_structured_prompt(ai_json)
-            print("   🔒 使用结构化 Prompt（强制 JSON 输出）...")
+            prompt = build_structured_prompt(ai_json, stats_context=stats_context)
+            print("   🔒 使用结构化 Prompt（强制 JSON 输出")
+            if stats_context:
+                print("   📊 已注入历史统计数据")
+            print("   ...")
             use_structured = True
         elif args.table:
             # 表格格式 + Markdown 输出
@@ -516,6 +562,35 @@ def main():
                     
                 print("   ✓ JSON 验证通过")
                 
+                # ========================================
+                # 4.6. 系统校验与调整（新增）
+                # ========================================
+                print(f"   🔍 校验条件: STATS_AVAILABLE={STATS_AVAILABLE}, stats_summary={'Yes' if stats_summary else 'None'}")
+                
+                if STATS_AVAILABLE and stats_summary:
+                    print("   🔍 执行预测校验...")
+                    try:
+                        validated_output, warnings = validate_prediction(
+                            validated_output,
+                            stats_summary,
+                            display_symbol,
+                            interval
+                        )
+                        
+                        if warnings:
+                            print("\n" + get_adjustment_summary(warnings))
+                        else:
+                            print("   ✓ 预测参数合理，无需调整")
+                    except Exception as val_err:
+                        print(f"   ⚠️  校验失败: {val_err}")
+                        import traceback
+                        traceback.print_exc()
+                else:
+                    if not STATS_AVAILABLE:
+                        print("   ⚠️  统计模块不可用，跳过校验")
+                    elif not stats_summary:
+                        print("   ⚠️  统计数据为空，跳过校验")
+                
                 # ⭐ 保存分析快照到数据库（AI 输出验证通过后）
                 try:
                     snapshot_id = save_snapshot(
@@ -532,6 +607,55 @@ def main():
                 print("\n" + "=" * 60)
                 print("【AI 结构化分析结果】")
                 print("=" * 60)
+                
+                # 1. 优先显示文字分析（如果有）
+                analysis_text = validated_output.get("analysis")
+                if analysis_text:
+                    print("\n" + "=" * 60)
+                    print("📝 AI 市场分析（给交易者看的解读）")
+                    print("=" * 60)
+                    # 按句号分段显示，提高可读性
+                    paragraphs = analysis_text.split("。")
+                    for para in paragraphs:
+                        if para.strip():
+                            print(f"  {para.strip()}。")
+                    print("=" * 60 + "\n")
+                
+                # 1.5. 显示策略概率（从 scenarios 中提取）
+                scenarios = validated_output.get("scenarios", [])
+                if scenarios:
+                    print("📊 策略概率分布：")
+                    print("-" * 60)
+                    
+                    # 按方向分组统计概率
+                    prob_map = {"up": 0.0, "down": 0.0, "range": 0.0}
+                    for scenario in scenarios:
+                        direction = scenario.get("direction", "")
+                        prob = scenario.get("probability", 0)
+                        if direction in prob_map:
+                            prob_map[direction] += prob
+                    
+                    # 显示各方向概率
+                    if prob_map["up"] > 0:
+                        print(f"  📈 做多策略概率: {prob_map['up'] * 100:.1f}%")
+                    if prob_map["down"] > 0:
+                        print(f"  📉 做空策略概率: {prob_map['down'] * 100:.1f}%")
+                    if prob_map["range"] > 0:
+                        print(f"  ↔️  震荡策略概率: {prob_map['range'] * 100:.1f}%")
+                    
+                    print("-" * 60 + "\n")
+                
+                # 2. 显示关键预测信息（精简版）
+                primary = validated_output.get("primary_scenario", {})
+                print("🎯 主要预测：")
+                print(f"   方向：{'📈 看涨' if primary.get('direction') == 'up' else '📉 看跌'}")
+                print(f"   目标幅度：{primary.get('target_pct', 0):.1f}%")
+                print(f"   止损幅度：{primary.get('stop_pct', 0):.1f}%")
+                print(f"   概率：{primary.get('probability', 0) * 100:.0f}%")
+                print(f"   触发条件：{primary.get('trigger', '')}")
+                
+                # 3. 显示完整 JSON（供调试或程序化使用）
+                print("\n📊 完整结构化数据：")
                 print(json.dumps(validated_output, ensure_ascii=False, indent=2))
                 print("=" * 60)
                     
@@ -586,11 +710,29 @@ def main():
                 f.write("---\n\n")
                 f.write(analysis_result)
             
-            print(f"   ✓ 报告已保存: {output_file}")
+            print(f"   \u2713 报告已保存: {output_file}")
         except Exception as e:
-            print(f"   ✗ 保存失败: {e}")
-    
-    print("\n✅ 分析完成！\n")
+            print(f"   \u2717 保存失败: {e}")
+        
+    # ========================================
+    # 8. 显示统计信息（可选）
+    # ========================================
+    if args.stats:
+        if not STATS_AVAILABLE:
+            print("\n\u26a0\ufe0f  统计模块不可用，请确保 query_stats.py 存在")
+        else:
+            print("\n" + "=" * 60)
+            print("📊 步骤 6/6: 显示统计信息...")
+            print("=" * 60)
+            try:
+                print_accuracy()
+                print("📊 如需查看详细统计，请运行：")
+                print("   python query_stats.py")
+                print("   python query_stats.py --export-csv results.csv")
+            except Exception as e:
+                print(f"   \u2717 统计显示失败: {e}")
+        
+    print("\n\u2705 分析完成！\n")
 
 
 if __name__ == "__main__":
