@@ -12,11 +12,12 @@ from ai_output_schema import get_schema_template
 from stat_hint import get_stat_hint
 
 
-def build_structured_prompt(ai_json: Dict[str, Any]) -> str:
-    """构造结构化输出 Prompt（强制 JSON 输出，含 A2.5 统计提示）
+def build_structured_prompt(ai_json: Dict[str, Any], stats_context: str = "") -> str:
+    """构造结构化输出 Prompt（强制 JSON 输出，含 A2.5 统计提示 + 历史表现）
     
     参数：
     - ai_json: 符合规范的 AI 输入 JSON
+    - stats_context: 历史统计上下文（可选）
     
     返回：
     - 强制约束的 Prompt 字符串
@@ -64,6 +65,7 @@ def build_structured_prompt(ai_json: Dict[str, Any]) -> str:
 你是一个【缠论结构分析引擎】，不是聊天机器人。
 你只能基于给定的缠论结构 JSON 进行分析。
 【统计提示】仅用于背景参考，不得作为结论依据，不得反向推理。
+【历史表现】可用于调整预测策略，但不得复述原文。
 
 【严禁事项】
 - 禁止使用技术指标（均线、MACD、RSI 等）
@@ -71,6 +73,11 @@ def build_structured_prompt(ai_json: Dict[str, Any]) -> str:
 - 禁止超出提供数据进行推断
 - 禁止输出 Schema 之外的字段
 """
+    
+    # === 历史表现上下文（可选） ===
+    history_block = ""
+    if stats_context:
+        history_block = stats_context + "\n"
     
     # === 缠论结构 JSON ===
     structure_block = f"""
@@ -83,7 +90,7 @@ def build_structured_prompt(ai_json: Dict[str, Any]) -> str:
 【输出格式约束】
 1. 必须输出一个合法 JSON，严格符合下方 JSON Schema。
 2. 不得复述或引用【统计提示】中的任何数字或文字。
-3. 不得使用"因为历史胜率…"等基于统计的表述。
+3. 不得使用“因为历史胜率…”等基于统计的表述。
 4. 字段名、层级、类型必须完全一致；数值使用 number，概率 0~1。
 5. 不允许出现 markdown 代码块标记，不允许多余文本。
 6. scenarios 的概率总和应不超过 1.05。
@@ -98,6 +105,18 @@ def build_structured_prompt(ai_json: Dict[str, Any]) -> str:
    - probability: 0~1 之间
    - trigger: 触发条件
    - reasoning: 逻辑推导
+8. analysis 字段（必须填写）：
+   - 3-5 段话的完整文字分析
+   - 给交易者看的市场解读和操作策略
+   - 必须包含以下内容：
+     a) 当前结构判断（笔、线段、中枢状态）
+     b) 可能走势分析（2-3种场景）
+     c) 关键价位（支撑位、阻力位、中枢区间）
+     d) **做多策略（概率 XX%）**：入场点位、目标位、止损位（如果适合做多）
+     e) **做空策略（概率 XX%）**：入场点位、目标位、止损位（如果适合做空）
+     f) **震荡策略（概率 XX%）**：价格区间、高抛低吸点位（如果是震荡）
+   - 概率应与 scenarios 中对应方向的概率一致
+   - 使用缠论术语，通俗易懂，给出具体价格
 
 【JSON Schema】
 ```json
@@ -107,7 +126,7 @@ def build_structured_prompt(ai_json: Dict[str, Any]) -> str:
 请直接输出符合 Schema 的 JSON，不要有任何其他内容：
 """
     
-    return system_block + "\n" + stat_block + "\n" + structure_block + "\n" + output_block
+    return system_block + "\n" + history_block + stat_block + "\n" + structure_block + "\n" + output_block
 
 
 def build_prompt(ai_json: Dict[str, Any]) -> str:
