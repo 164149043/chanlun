@@ -32,12 +32,19 @@ from binance import get_klines
 # ============================================
 
 DB_PATH = Path(__file__).parent / "chanlun_ai.db"
-FUTURE_BARS = 50  # 观察未来 50 根 K 线（推荐：24h周期用50，1h周期用30-50）
+
+# 根据周期设置不同的评估窗口（K线根数）
+FUTURE_BARS_CONFIG = {
+    "1h": 20,   # 20小时
+    "4h": 10,   # 10*4 = 40小时
+    "1d": 10,   # 10天
+}
 
 # 评估窗口说明：
-# - 1h 周期：50根 = 50小时 ≈ 2天，适合 1.5-3.0% 的目标
-# - 4h 周期：50根 = 200小时 ≈ 8天，适合 3.0-6.0% 的目标
-# - 1d 周期：50根 = 50天 ≈ 7周，适合 5.0-10.0% 的目标
+# - 1h 周期：20根 = 20小时，适合快速测试
+# - 4h 周期：10根 = 40小时，适合快速测试
+# - 1d 周期：10根 = 10天，适合快速测试
+# 注意：正式使用建议增加到 48-50 根以获得更准确的评估
 
 
 # ============================================
@@ -153,6 +160,32 @@ def evaluate_outcome(ai_json: dict, future_klines: List[Dict[str, Any]], entry_p
         max_favorable_move = round(max(abs(max_up_move), abs(max_down_move)), 2)
         max_adverse_move = round(min(abs(max_up_move), abs(max_down_move)), 2)
     
+    # 5. 计算综合得分和结果分类
+    final_close = future_closes[-1]
+    final_move = (final_close - entry_price) / entry_price * 100
+    
+    if direction in ["up", "down"]:
+        if hit_target and not hit_stop:
+            score = 1.0
+            outcome = "success"
+        elif hit_stop:
+            score = 0.0
+            outcome = "stopped"
+        elif not hit_target and not hit_stop:
+            # 根据最终走势评分
+            if (direction == "up" and final_move > 0) or (direction == "down" and final_move < 0):
+                score = 0.5
+                outcome = "partial"  # 方向对但未达目标
+            else:
+                score = 0.0
+                outcome = "failed"  # 方向错误
+        else:
+            score = 0.0
+            outcome = "unknown"
+    else:
+        score = 0.0
+        outcome = "no_direction"
+    
     return {
         "direction": direction,
         "target_pct": target_pct,
@@ -161,10 +194,14 @@ def evaluate_outcome(ai_json: dict, future_klines: List[Dict[str, Any]], entry_p
         "hit_stop": hit_stop,
         "max_favorable_move": max_favorable_move,
         "max_adverse_move": max_adverse_move,
+        "final_move": round(final_move, 2),
         "evaluated_bars": len(future_klines),
         "entry_price": entry_price,
+        "final_price": round(final_close, 4),
         "max_high": max_high,
         "min_low": min_low,
+        "score": score,
+        "outcome": outcome,
     }
 
 
@@ -214,22 +251,25 @@ def main():
             # 4. 标准化交易对格式（BTC/USDT → BTCUSDT）
             binance_symbol = symbol.replace("/", "")
             
-            # 5. 拉取未来 K 线（从分析时间开始）
-            print(f"  ⏳ 拉取未来 {FUTURE_BARS} 根 K 线...")
+            # 5. 根据周期获取需要的 K 线数量
+            future_bars = FUTURE_BARS_CONFIG.get(interval, 50)
+            
+            # 6. 拉取未来 K 线（从分析时间开始）
+            print(f"  ⏳ 拉取未来 {future_bars} 根 K 线...")
             
             klines = get_klines(
                 symbol=binance_symbol,
                 interval=interval,
-                limit=FUTURE_BARS,
+                limit=future_bars,
                 start_time=start_time_ms
             )
             
-            if len(klines) < FUTURE_BARS:
-                print(f"  ⚠️  K 线数量不足（{len(klines)}/{FUTURE_BARS}），跳过")
+            if len(klines) < future_bars:
+                print(f"  ⚠️  K 线数量不足（{len(klines)}/{future_bars}），跳过")
                 failed_count += 1
                 continue
             
-            # 6. 获取入场价格（分析时的价格）
+            # 7. 获取入场价格（分析时的价格）
             # 从数据库读取
             cursor = conn.execute(
                 "SELECT price FROM analysis_snapshot WHERE id = ?",
@@ -237,7 +277,7 @@ def main():
             )
             entry_price = cursor.fetchone()[0]
             
-            # 7. 评估结果
+            # 8. 评估结果
             outcome = evaluate_outcome(ai_json, klines, entry_price)
             
             if "error" in outcome:
@@ -245,15 +285,17 @@ def main():
                 failed_count += 1
                 continue
             
-            # 8. 保存结果
+            # 9. 保存结果
             mark_as_evaluated(conn, record_id, outcome)
             
             print(f"  方向: {outcome['direction']}")
             print(f"  目标: {outcome['target_pct']}% | 止损: {outcome['stop_pct']}%")
             print(f"  命中目标: {'✓' if outcome['hit_target'] else '✗'}")
             print(f"  触发止损: {'✓' if outcome['hit_stop'] else '✗'}")
-            print(f"  最大有利变动: {outcome['max_favorable_move']}%")
-            print(f"  最大不利变动: {outcome['max_adverse_move']}%")
+            print(f"  结果: {outcome['outcome']} (得分: {outcome['score']:.1f})")
+            print(f"  最终变动: {outcome['final_move']}%")
+            print(f"  最大有利: {outcome['max_favorable_move']}%")
+            print(f"  最大不利: {outcome['max_adverse_move']}%")
             print(f"  ✓ outcome 已回填\n")
             
             success_count += 1
