@@ -13,6 +13,7 @@ AI_OUTPUT_SCHEMA = {
         "price": "number",
         "timestamp": "string"
     },
+    "analysis": "string",  # AI 的文字分析内容（可选）
     "structure_judgement": {
         "current_state": "string",
         "latest_bi": {
@@ -119,6 +120,7 @@ def get_schema_template() -> str:
     "price": "number",
     "timestamp": "string"
   },
+  "analysis": "string (必须填写：3-5段话的完整分析，包含当前结构、走势分析、关键价位、做多/做空/震荡策略与具体点位）",
   "structure_judgement": {
     "current_state": "string",
     "latest_bi": {
