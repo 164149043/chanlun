@@ -53,9 +53,15 @@ class SimpleBi:
         end_time: Any,
         start_price: float,
         end_price: float,
+        start_index: Optional[int] = None,
+        end_index: Optional[int] = None,
     ):
         self.index = index
         self.type = direction  # 'up' or 'down'
+        
+        # K 线索引范围（用于力度计算）
+        self.start_index = start_index
+        self.end_index = end_index
         
         # 基本时间与价格信息
         self.start_time = start_time
@@ -76,6 +82,9 @@ class SimpleBi:
         else:
             self.high = start_price
             self.low = end_price
+        
+        # 力度（MACD 柱子之和），默认 0
+        self.strength: float = 0.0
         
         # 买卖点和背驰列表
         self.mmds = []  # 买卖点列表
@@ -103,9 +112,15 @@ class SimpleXD:
         end_price: float,
         ding_time: Any = None,
         di_time: Any = None,
+        start_bi_index: Optional[int] = None,
+        end_bi_index: Optional[int] = None,
     ):
         self.index = index
         self.type = direction
+        
+        # 线段覆盖的笔索引范围（用于力度计算）
+        self.start_bi_index = start_bi_index
+        self.end_bi_index = end_bi_index
         
         # 基本时间与价格信息
         self.start_time = start_time
@@ -130,6 +145,9 @@ class SimpleXD:
             self.low = end_price
             self.ding_fx = SimpleFX(ding_time or start_time, start_price, start_kline)
             self.di_fx = SimpleFX(di_time or end_time, end_price, end_kline)
+        
+        # 力度（MACD 柱子之和），默认 0
+        self.strength: float = 0.0
         
         # 买卖点和背驰列表
         self.mmds: List[Any] = []
@@ -281,6 +299,9 @@ class SimpleICL:
         # 3. 根据笔生成线段
         self._xds = self._calculate_xd(self._bis)
         
+        # 3.5 计算笔和线段的力度（MACD 柱子之和）
+        self._calculate_strengths(df)
+        
         # 4. 计算中枢
         self._bi_zss = self._calculate_zs(self._bis, "bi")
         self._xd_zss = self._calculate_zs(self._xds, "xd")
@@ -385,11 +406,54 @@ class SimpleICL:
                 end_time=fx_end["time"],
                 start_price=fx_start["price"],
                 end_price=fx_end["price"],
+                start_index=fx_start["index"],
+                end_index=fx_end["index"],
             )
             bis.append(bi)
             bi_index += 1
         
         return bis
+    
+    def _calculate_strengths(self, df: pd.DataFrame) -> None:
+        """计算笔和线段的力度（基于 MACD 柱子之和）"""
+        if not self._bis:
+            return
+        
+        close = df["close"].astype(float)
+        # 典型 MACD 参数：12, 26, 9
+        ema_short = close.ewm(span=12, adjust=False).mean()
+        ema_long = close.ewm(span=26, adjust=False).mean()
+        dif = ema_short - ema_long
+        dea = dif.ewm(span=9, adjust=False).mean()
+        macd_hist = (dif - dea) * 2  # 与常规 MACD 保持一致
+        hist_values = macd_hist.to_list()
+        n = len(hist_values)
+        
+        # 1) 为每一笔计算力度
+        for bi in self._bis:
+            start_idx = getattr(bi, "start_index", None)
+            end_idx = getattr(bi, "end_index", None)
+            if start_idx is None or end_idx is None:
+                bi.strength = 0.0
+                continue
+            s = max(0, min(start_idx, end_idx))
+            e = min(n - 1, max(start_idx, end_idx))
+            segment = hist_values[s : e + 1]
+            if bi.type == "up":
+                bi.strength = float(sum(v for v in segment if v > 0))
+            else:
+                bi.strength = float(sum(-v for v in segment if v < 0))
+        
+        # 2) 为每一线段计算力度（笔力度之和）
+        for xd in self._xds:
+            start_bi_index = getattr(xd, "start_bi_index", None)
+            end_bi_index = getattr(xd, "end_bi_index", None)
+            if start_bi_index is None or end_bi_index is None:
+                xd.strength = 0.0
+                continue
+            s = max(0, min(start_bi_index, end_bi_index))
+            e = min(len(self._bis) - 1, max(start_bi_index, end_bi_index))
+            xd.strength = float(sum(self._bis[i].strength for i in range(s, e + 1)))
     
     def _calculate_xd(self, bis: List[SimpleBi]) -> List[SimpleXD]:
         """根据笔生成线段
@@ -429,6 +493,8 @@ class SimpleICL:
                     end_price=end_bi.end_price,
                     ding_time=end_bi.end_time if direction == "up" else start_bi.start_time,
                     di_time=start_bi.start_time if direction == "up" else end_bi.end_time,
+                    start_bi_index=i,
+                    end_bi_index=j - 1,
                 )
                 xds.append(xd)
                 xd_index += 1
@@ -567,6 +633,12 @@ class SimpleICL:
         
         # 2. 计算线段的背驰和买卖点
         self._calculate_xd_bcs_and_mmds()
+        
+        # 3. 计算三类买卖点
+        self._calculate_xd_class3_mmds()
+        
+        # 4. 计算类二/类三买卖点
+        self._calculate_xd_like_class2_and_class3_mmds()
     
     def _calculate_bi_bcs_and_mmds(self) -> None:
         """计算笔的背驰和买卖点"""
@@ -666,40 +738,206 @@ class SimpleICL:
                     
                     break
     
+    def _calculate_xd_class3_mmds(self) -> None:
+        """计算三类买卖点（基于线段和线段中枢）"""
+        if not self._xds or not self._xd_zss:
+            return
+        
+        xds = self._xds
+        zss = self._xd_zss
+        
+        def get_xd_range(xd: SimpleXD) -> tuple:
+            """获取线段价格区间（低点、高点）"""
+            start_price = getattr(xd, "start_price", 0.0)
+            end_price = getattr(xd, "end_price", 0.0)
+            low = min(start_price, end_price)
+            high = max(start_price, end_price)
+            return low, high
+        
+        for zs in zss:
+            # 找到属于该中枢时间区间内的线段索引
+            indices_in_zs = []
+            for idx, xd in enumerate(xds):
+                start_time = getattr(xd, "start_time", None)
+                end_time = getattr(xd, "end_time", None)
+                if start_time is None or end_time is None:
+                    continue
+                if start_time >= zs.start_time and end_time <= zs.end_time:
+                    indices_in_zs.append(idx)
+            
+            if not indices_in_zs:
+                continue
+            
+            last_idx = indices_in_zs[-1]
+            
+            # 从离开中枢后的第一条线段开始寻找三类买卖点
+            i = last_idx + 1
+            while i < len(xds):
+                xd = xds[i]
+                start_price = getattr(xd, "start_price", None)
+                if start_price is None:
+                    i += 1
+                    continue
+                low, high = get_xd_range(xd)
+                
+                # 向上离开中枢，寻找三类买点
+                if xd.type == "up" and zs.zd < start_price < zs.zg and high > zs.zg:
+                    # 找后续的第一条向下线段
+                    j = i + 1
+                    while j < len(xds):
+                        down_xd = xds[j]
+                        if down_xd.type != "down":
+                            j += 1
+                            continue
+                        down_low, _ = get_xd_range(down_xd)
+                        # 不回中枢：最低点仍高于中枢下沿
+                        if down_low > zs.zd:
+                            down_xd.mmds.append(SimpleMMD(
+                                name="3buy",
+                                zs=zs,
+                                msg="三类买点"
+                            ))
+                        break
+                    break
+                
+                # 向下离开中枢，寻找三类卖点
+                if xd.type == "down" and zs.zd < start_price < zs.zg and low < zs.zd:
+                    j = i + 1
+                    while j < len(xds):
+                        up_xd = xds[j]
+                        if up_xd.type != "up":
+                            j += 1
+                            continue
+                        _, up_high = get_xd_range(up_xd)
+                        # 不回中枢：最高点仍低于中枢上沿
+                        if up_high < zs.zg:
+                            up_xd.mmds.append(SimpleMMD(
+                                name="3sell",
+                                zs=zs,
+                                msg="三类卖点"
+                            ))
+                        break
+                    break
+                
+                i += 1
+    
+    def _calculate_xd_like_class2_and_class3_mmds(self) -> None:
+        """计算类二、类三买卖点（基于已有二类/三类买卖点）"""
+        if not self._xds:
+            return
+        
+        def get_xd_range(xd: SimpleXD) -> tuple:
+            start_price = getattr(xd, "start_price", 0.0)
+            end_price = getattr(xd, "end_price", 0.0)
+            low = min(start_price, end_price)
+            high = max(start_price, end_price)
+            return low, high
+        
+        last_2buy_xd: Optional[SimpleXD] = None
+        last_2sell_xd: Optional[SimpleXD] = None
+        last_3buy_xd: Optional[SimpleXD] = None
+        last_3sell_xd: Optional[SimpleXD] = None
+        
+        for xd in self._xds:
+            low, high = get_xd_range(xd)
+            
+            # 类第二类买点/卖点
+            if last_2buy_xd is not None and xd.type == "up":
+                prev_low, prev_high = get_xd_range(last_2buy_xd)
+                # 与前一二类买点线段形成价格重叠（近似中枢），且当前低点抬高
+                if min(high, prev_high) > max(low, prev_low) and low > prev_low:
+                    xd.mmds.append(SimpleMMD(
+                        name="class2buy",
+                        zs=None,
+                        msg="类第二类买点"
+                    ))
+            if last_2sell_xd is not None and xd.type == "down":
+                prev_low, prev_high = get_xd_range(last_2sell_xd)
+                if min(high, prev_high) > max(low, prev_low) and high < prev_high:
+                    xd.mmds.append(SimpleMMD(
+                        name="class2sell",
+                        zs=None,
+                        msg="类第二类卖点"
+                    ))
+            
+            # 类第三类买点/卖点
+            if last_3buy_xd is not None and xd.type == "up":
+                prev_low, prev_high = get_xd_range(last_3buy_xd)
+                if min(high, prev_high) > max(low, prev_low) and low > prev_low:
+                    xd.mmds.append(SimpleMMD(
+                        name="class3buy",
+                        zs=None,
+                        msg="类第三类买点"
+                    ))
+            if last_3sell_xd is not None and xd.type == "down":
+                prev_low, prev_high = get_xd_range(last_3sell_xd)
+                if min(high, prev_high) > max(low, prev_low) and high < prev_high:
+                    xd.mmds.append(SimpleMMD(
+                        name="class3sell",
+                        zs=None,
+                        msg="类第三类卖点"
+                    ))
+            
+            # 更新最近的二类/三类买卖点线段
+            mmd_names = [getattr(m, "name", "") for m in getattr(xd, "mmds", []) or []]
+            if "2buy" in mmd_names and xd.type == "up":
+                last_2buy_xd = xd
+            if "2sell" in mmd_names and xd.type == "down":
+                last_2sell_xd = xd
+            if "3buy" in mmd_names and xd.type == "up":
+                last_3buy_xd = xd
+            if "3sell" in mmd_names and xd.type == "down":
+                last_3sell_xd = xd
+    
     def _check_bi_divergence(self, prev_bi: SimpleBi, current_bi: SimpleBi) -> bool:
         """检测笔背驰
         
-        简化逻辑：比较两笔的幅度，后笔幅度更小且价格更极端则为背驰
+        规则：
+        - 同方向两笔比较；
+        - 后一笔价格更极端（新高/新低）；
+        - 后一笔力度（MACD 柱子之和）明显减弱。
         """
         if prev_bi.type != current_bi.type:
             return False
         
-        prev_amplitude = abs(prev_bi.end_price - prev_bi.start_price)
-        current_amplitude = abs(current_bi.end_price - current_bi.start_price)
+        prev_strength = getattr(prev_bi, "strength", 0.0)
+        curr_strength = getattr(current_bi, "strength", 0.0)
+        if prev_strength <= 0 or curr_strength <= 0:
+            return False
         
         if prev_bi.type == "up":
-            # 上笔：后笔高点更高但幅度更小
-            return (current_bi.end_price > prev_bi.end_price and 
-                    current_amplitude < prev_amplitude * 0.8)
+            # 上笔：后笔高点更高但力度更弱
+            return (
+                current_bi.end_price > prev_bi.end_price
+                and curr_strength < prev_strength * 0.8
+            )
         else:
-            # 下笔：后笔低点更低但幅度更小
-            return (current_bi.end_price < prev_bi.end_price and 
-                    current_amplitude < prev_amplitude * 0.8)
+            # 下笔：后笔低点更低但力度更弱
+            return (
+                current_bi.end_price < prev_bi.end_price
+                and curr_strength < prev_strength * 0.8
+            )
     
     def _check_xd_divergence(self, prev_xd: SimpleXD, current_xd: SimpleXD) -> bool:
-        """检测线段背驰"""
+        """检测线段背驰（段背驰）"""
         if prev_xd.type != current_xd.type:
             return False
         
-        prev_amplitude = abs(prev_xd.end_price - prev_xd.start_price)
-        current_amplitude = abs(current_xd.end_price - current_xd.start_price)
+        prev_strength = getattr(prev_xd, "strength", 0.0)
+        curr_strength = getattr(current_xd, "strength", 0.0)
+        if prev_strength <= 0 or curr_strength <= 0:
+            return False
         
         if prev_xd.type == "up":
-            return (current_xd.end_price > prev_xd.end_price and 
-                    current_amplitude < prev_amplitude * 0.8)
+            return (
+                current_xd.end_price > prev_xd.end_price
+                and curr_strength < prev_strength * 0.8
+            )
         else:
-            return (current_xd.end_price < prev_xd.end_price and 
-                    current_amplitude < prev_amplitude * 0.8)
+            return (
+                current_xd.end_price < prev_xd.end_price
+                and curr_strength < prev_strength * 0.8
+            )
     
     def _find_related_zs(self, item: Any, zss: List[SimpleZS]) -> Optional[SimpleZS]:
         """查找与笔/线段相关的中枢"""
