@@ -200,16 +200,49 @@ python evaluate_outcome.py 1440
    python evaluate_outcome.py 60
    ```
 
-4. **查看准确率**
+4. **查看准确率与平均得分**
    ```bash
    python query_stats.py --accuracy
    ```
 
----
+### 得分（score）计算规则
 
-## 🏗️ 项目架构
+> 评估一条预测的“质量”，范围 0.0 ~ 1.0，越高越好。
 
-```
+- **方向为 up/down 时**：
+  - 命中目标，且未触发止损：
+    - `score = 1.0`（方向对 + 到目标，表现最好）
+    - `outcome = "success"`
+  - 触发止损：
+    - `score = 0.0`
+    - `outcome = "stopped"`
+  - 既没到目标、也没止损：
+    - 如果方向对（看多最终涨、看空最终跌）：
+      - `score = 0.5`（方向对但没走到目标）
+      - `outcome = "partial"`
+    - 如果方向错：
+      - `score = 0.0`
+      - `outcome = "failed"`
+- **其他情况（方向不是 up/down）**：
+  - `score = 0.0`
+  - `outcome = "no_direction"`
+
+在 `query_stats.py --accuracy` 中展示的：
+
+- **平均得分** = 所有已评估记录的 score 平均值（0~1）
+- 用于衡量“这批预测整体质量如何”，而不仅仅是命中率。
+- 含义就是：
+在所有已评估的预测中，每次预测的平均“质量”，0~1 之间，越接近 1 表示整体越常出现“方向对且到目标”的情况。
+3. 如何解读 0.33 / 1.0 这种数字？
+接近 1.0：大部分预测是“方向对 + 达目标”
+接近 0.5：很多是“方向对但没到目标”，或者“好坏参半”
+接近 0.0：要么经常止损，要么方向经常错，整体表现较弱
+所以你看到终端里类似：
+text
+平均得分: 0.33 / 1.0
+可以理解为：
+系统历史上这批预测的整体质量 偏中下，大部分不是满分命中，也有不少方向错或止损的情况。
+
 chanlun/
 ├── ai/                          # AI 调用模块
 │   ├── llm.py                  # LLM 统一接口
@@ -371,7 +404,6 @@ AI_PROVIDER=deepseek
 AI_MODEL=deepseek-chat
 DEEPSEEK_API_KEY=sk-your-key
 ```
-
 ---
 
 ## 📈 数据库设计
@@ -390,24 +422,6 @@ DEEPSEEK_API_KEY=sk-your-key
 | created_at | TEXT | 创建时间（UTC） |
 | evaluated | INTEGER | 是否已评估（0=未评估，1=已评估） |
 | outcome_json | TEXT | 评估结果 JSON（hit_target、hit_stop、最大波动等） |
-
-### 表 2: `analysis_outcome`（旧版结果回填，当前方案可选）
-
-> 说明：该表为早期方案保留，当前 **方案 A** 主要使用 `analysis_snapshot.outcome_json` 存储评估结果，`evaluate_outcome.py` 与 `query_stats.py` 默认只依赖该字段与 `evaluated` 标记。
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | INTEGER | 主键 |
-| snapshot_id | INTEGER | 关联快照 ID |
-| check_after_minutes | INTEGER | 评估间隔（旧方案使用） |
-| future_price | REAL | 未来价格 |
-| max_price | REAL | 期间最高价 |
-| min_price | REAL | 期间最低价 |
-| result_direction | TEXT | 实际方向 |
-| hit_scenario_rank | INTEGER | 命中的 scenario（旧方案使用） |
-| note | TEXT | 备注 |
-| checked_at | TEXT | 检查时间 |
-
 ---
 
 ## 🎯 功能特性
@@ -419,8 +433,9 @@ DEEPSEEK_API_KEY=sk-your-key
 - ✅ 笔（Bi）：自动识别向上笔和向下笔
 - ✅ 线段（Segment）：基于笔计算线段
 - ✅ 中枢（ZS）：识别震荡中枢和中枢关系
-- ✅ 买卖点（MMD）：一买、二买、三买、一卖、二卖、三卖
-- ✅ 背驰（BC）：笔背驰、段背驰
+- ✅ 买卖点（MMD）：一买、二买、三买、一卖、二卖、三卖，以及 **类二 / 类三买卖点**（class2buy/class3buy 等）
+- ✅ 背驰（BC）：基于 **MACD 力度（柱子之和）** 的笔背驰、段背驰（内部使用 MACD，只作为力度比较，不直接暴露给 AI）
+
 
 ### 2. AI 分析模式
 
@@ -469,26 +484,6 @@ DEEPSEEK_API_KEY=sk-your-key
 - ✅ 结构化模式（`--structured`）的 Prompt 会自动注入【统计提示 A2.5｜仅供参考】，但通过系统约束禁止 AI 直接引用或基于胜率做推理，统计只作用于“人类读者”。
 ---
 
-## 🛡️ 安全说明
-
-### 敏感信息保护
-
-- ✅ `.env` 文件已在 `.gitignore` 中排除
-- ✅ API Key 不会上传到 GitHub
-- ✅ 数据库文件不会上传
-- ✅ 仅上传 `.env.example` 作为配置示例
-
-### 推荐做法
-
-1. **不要**直接在代码中硬编码 API Key
-2. **使用** `.env` 文件管理敏感配置
-3. **定期更换** API Key
-4. **监控** API 使用量，避免超额
-
----
-
-## 🤝 贡献指南
-
 欢迎提交 Issue 和 Pull Request！
 
 ### 开发流程
@@ -504,22 +499,6 @@ DEEPSEEK_API_KEY=sk-your-key
 ## 📄 许可证
 
 本项目采用 MIT 许可证。详见 [LICENSE](LICENSE) 文件。
-
----
-
-## 🙏 致谢
-
-- [Binance API](https://binance-docs.github.io/apidocs/) - 提供免费的行情数据
-- [缠论](https://baike.baidu.com/item/%E7%BC%A0%E8%AE%BA) - 技术分析理论基础
-- [DeepSeek](https://www.deepseek.com/) - AI 模型支持
-- [硅基流动](https://siliconflow.cn/) - AI 服务提供商
-
----
-
-## 📞 联系方式
-
-- **项目主页**：[https://github.com/164149043/chanlun](https://github.com/164149043/chanlun)
-- **问题反馈**：[Issues](https://github.com/164149043/chanlun/issues)
 
 ---
 
