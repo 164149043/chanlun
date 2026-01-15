@@ -36,10 +36,32 @@ Write-Host "任务 2 已创建: $TaskName2" -ForegroundColor Green
 
 $TaskName3 = "ChanLun-AI-ETH-1h-Analysis"
 $Action3 = New-ScheduledTaskAction -Execute $PythonExe -Argument "chanlun_ai.py ETHUSDT 1h --structured --limit 500" -WorkingDirectory $ProjectPath
-$Trigger3 = New-ScheduledTaskTrigger -Once -At "00:00" -RepetitionInterval (New-TimeSpan -Hours 1)
+$Trigger3 = New-ScheduledTaskTrigger -Once -At "00:01" -RepetitionInterval (New-TimeSpan -Hours 1)
 $Settings3 = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
 Register-ScheduledTask -TaskName $TaskName3 -Action $Action3 -Trigger $Trigger3 -Settings $Settings3 -Description "每小时生成 ETHUSDT 1h 缠论 AI 分析快照" -Force
 Write-Host "任务 3 已创建: $TaskName3" -ForegroundColor Green
+
+# ========================================
+# 任务 4: 每 15 分钟生成 BTC 分析快照
+# ========================================
+
+$TaskName4 = "ChanLun-AI-BTC-15m-Analysis"
+$Action4 = New-ScheduledTaskAction -Execute $PythonExe -Argument "chanlun_ai.py BTCUSDT 15m --structured --limit 500" -WorkingDirectory $ProjectPath
+$Trigger4 = New-ScheduledTaskTrigger -Once -At "00:00" -RepetitionInterval (New-TimeSpan -Minutes 15)
+$Settings4 = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+Register-ScheduledTask -TaskName $TaskName4 -Action $Action4 -Trigger $Trigger4 -Settings $Settings4 -Description "每 15 分钟生成 BTCUSDT 15m 缠论 AI 分析快照" -Force
+Write-Host "任务 4 已创建: $TaskName4" -ForegroundColor Green
+
+# ========================================
+# 任务 5: 每 15 分钟生成 ETH 分析快照
+# ========================================
+
+$TaskName5 = "ChanLun-AI-ETH-15m-Analysis"
+$Action5 = New-ScheduledTaskAction -Execute $PythonExe -Argument "chanlun_ai.py ETHUSDT 15m --structured --limit 500" -WorkingDirectory $ProjectPath
+$Trigger5 = New-ScheduledTaskTrigger -Once -At "00:01" -RepetitionInterval (New-TimeSpan -Minutes 15)
+$Settings5 = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+Register-ScheduledTask -TaskName $TaskName5 -Action $Action5 -Trigger $Trigger5 -Settings $Settings5 -Description "每 15 分钟生成 ETHUSDT 15m 缠论 AI 分析快照" -Force
+Write-Host "任务 5 已创建: $TaskName5" -ForegroundColor Green
 
 # ========================================
 # 完成
@@ -56,9 +78,13 @@ Write-Host "手动运行测试:" -ForegroundColor Yellow
 Write-Host "  Start-ScheduledTask -TaskName ChanLun-AI-BTC-1h-Analysis" -ForegroundColor White
 Write-Host "  Start-ScheduledTask -TaskName ChanLun-AI-1h-Evaluate" -ForegroundColor White
 Write-Host "  Start-ScheduledTask -TaskName ChanLun-AI-ETH-1h-Analysis" -ForegroundColor White
+Write-Host "  Start-ScheduledTask -TaskName ChanLun-AI-BTC-15m-Analysis" -ForegroundColor White
+Write-Host "  Start-ScheduledTask -TaskName ChanLun-AI-ETH-15m-Analysis" -ForegroundColor White
 Write-Host ""
 Write-Host "删除任务:" -ForegroundColor Yellow
 Write-Host ('  Unregister-ScheduledTask -TaskName ChanLun-AI-BTC-1h-Analysis -Confirm:$false') -ForegroundColor White
 Write-Host ('  Unregister-ScheduledTask -TaskName ChanLun-AI-1h-Evaluate -Confirm:$false') -ForegroundColor White
 Write-Host ('  Unregister-ScheduledTask -TaskName ChanLun-AI-ETH-1h-Analysis -Confirm:$false') -ForegroundColor White
+Write-Host ('  Unregister-ScheduledTask -TaskName ChanLun-AI-BTC-15m-Analysis -Confirm:$false') -ForegroundColor White
+Write-Host ('  Unregister-ScheduledTask -TaskName ChanLun-AI-ETH-15m-Analysis -Confirm:$false') -ForegroundColor White
 Write-Host ""
