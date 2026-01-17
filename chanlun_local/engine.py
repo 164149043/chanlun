@@ -1,166 +1,218 @@
-"""缠论引擎封装（engine）
+"""缠论引擎封装（engine）- 改进版
 
 本模块的职责：
 - 接收已经准备好的、完整的 K 线数据序列（不裁剪、不修改）
 - 进行缠论结构计算（笔、线段、中枢等）
 - 返回 ICL 对象，供上层按需读取笔、线段、中枢、买卖点、背驰等结构
 
-本模块不会做的事情：
-- 不从交易所 / 本地文件加载原始数据（这部分交给 mapper.py）
-- 不把结果转换成 JSON / dict（序列化交给上层）
-- 不裁剪 K 线数量，不更改数据内容
-
-说明：
-- 当前使用简化的占位实现（SimpleICL），可后续替换为完整的缠论算法
+改进内容（v2.0）：
+1. K线包含关系处理 - 合并K线后再识别分型
+2. 分型识别完善 - 严格的顶底分型判断
+3. 笔算法改进 - 正确处理分型连接和笔的延伸
+4. 线段算法重写 - 基于特征序列分型
+5. 中枢计算优化 - 完善中枢关系判断
+6. 背驰和买卖点完善 - 多维度力度计算
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 import logging
 
 import pandas as pd
+import numpy as np
 
 # 设置日志
 logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# 简化的缠论结构对象（自实现）
+# 缠论结构对象定义
 # ============================================================
 
+class MergedKline:
+    """合并后的K线对象（处理包含关系后）"""
+    def __init__(
+        self,
+        index: int,
+        date: Any,
+        high: float,
+        low: float,
+        open_price: float,
+        close: float,
+        raw_indices: List[int] = None,
+    ):
+        self.index = index  # 合并后的索引
+        self.date = date
+        self.high = high
+        self.low = low
+        self.open = open_price
+        self.close = close
+        self.raw_indices = raw_indices or [index]  # 原始K线索引列表
+    
+    def __repr__(self):
+        return f"<MergedKline idx={self.index} H={self.high:.2f} L={self.low:.2f}>"
+
+
+class SimpleFX:
+    """分型对象（顶分型/底分型）"""
+    def __init__(
+        self,
+        fx_type: str,
+        index: int,
+        kline: MergedKline,
+        price: float,
+        time: Any,
+        raw_index: int = None,
+    ):
+        self.type = fx_type  # "ding" 或 "di"
+        self.index = index   # 在合并K线列表中的索引
+        self.k = kline       # 中间那根K线
+        self.val = price     # 分型价格（顶分型取high，底分型取low）
+        self.time = time
+        self.raw_index = raw_index or index  # 原始K线索引
+    
+    def __repr__(self):
+        return f"<SimpleFX type={self.type} idx={self.index} price={self.val:.2f}>"
+
+
 class SimpleKline:
-    """简化的 K 线对象（用于分型）"""
+    """简化的 K 线对象（用于兼容 mapper.py）"""
     def __init__(self, date: Any, high: float, low: float, close: float):
         self.date = date
         self.high = high
         self.low = low
         self.close = close
 
-class SimpleFX:
-    """简化的分型对象（顶分型/底分型）"""
-    def __init__(self, time: Any, price: float, kline: Any = None):
-        self.k = kline if kline else SimpleKline(time, price, price, price)
-        self.val = price
 
 class SimpleBi:
-    """简化的笔对象（兼容 mapper.py）"""
+    """笔对象（改进版）"""
     def __init__(
         self,
         index: int,
         direction: str,
-        start_time: Any,
-        end_time: Any,
-        start_price: float,
-        end_price: float,
-        start_index: Optional[int] = None,
-        end_index: Optional[int] = None,
+        start_fx: SimpleFX,
+        end_fx: SimpleFX,
+        start_index: int,
+        end_index: int,
+        is_done: bool = True,
     ):
         self.index = index
         self.type = direction  # 'up' or 'down'
+        self._is_done = is_done
+        
+        # 分型信息
+        self.start_fx = start_fx
+        self.end_fx = end_fx
         
         # K 线索引范围（用于力度计算）
         self.start_index = start_index
         self.end_index = end_index
         
-        # 基本时间与价格信息
-        self.start_time = start_time
-        self.end_time = end_time
-        self.start_price = float(start_price)
-        self.end_price = float(end_price)
+        # 时间与价格信息
+        self.start_time = start_fx.time
+        self.end_time = end_fx.time
+        self.start_price = float(start_fx.val)
+        self.end_price = float(end_fx.val)
         
-        # mapper.py 需要的分型结构
-        start_kline = SimpleKline(start_time, start_price, start_price, start_price)
-        end_kline = SimpleKline(end_time, end_price, end_price, end_price)
-        self.start = SimpleFX(start_time, start_price, start_kline)
-        self.end = SimpleFX(end_time, end_price, end_kline)
+        # 兼容 mapper.py 的分型结构
+        start_kline = SimpleKline(self.start_time, self.start_price, self.start_price, self.start_price)
+        end_kline = SimpleKline(self.end_time, self.end_price, self.end_price, self.end_price)
+        self.start = SimpleFX("di" if direction == "up" else "ding", start_fx.index, start_fx.k, self.start_price, self.start_time)
+        self.end = SimpleFX("ding" if direction == "up" else "di", end_fx.index, end_fx.k, self.end_price, self.end_time)
         
         # 高低点
         if direction == "up":
-            self.high = end_price
-            self.low = start_price
+            self.high = self.end_price
+            self.low = self.start_price
         else:
-            self.high = start_price
-            self.low = end_price
+            self.high = self.start_price
+            self.low = self.end_price
         
-        # 力度（MACD 柱子之和），默认 0
+        # 力度（多维度），默认 0
         self.strength: float = 0.0
+        self.macd_strength: float = 0.0
+        self.price_strength: float = 0.0
+        self.slope_strength: float = 0.0
         
         # 买卖点和背驰列表
-        self.mmds = []  # 买卖点列表
-        self.bcs = []   # 背驰列表
+        self.mmds: List[Any] = []
+        self.bcs: List[Any] = []
     
     def is_done(self) -> bool:
-        """判断笔是否完成（简化实现：始终返回 True）"""
-        return True
+        """判断笔是否完成"""
+        return self._is_done
     
     def __repr__(self):
         return (
             f"<SimpleBi index={self.index} type={self.type} "
-            f"start={self.start_time} end={self.end_time}>"
+            f"start={self.start_price:.2f} end={self.end_price:.2f} done={self._is_done}>"
         )
 
+
 class SimpleXD:
-    """简化的线段对象（兼容 mapper.py）"""
+    """线段对象（改进版）"""
     def __init__(
         self,
         index: int,
         direction: str,
-        start_time: Any,
-        end_time: Any,
-        start_price: float,
-        end_price: float,
-        ding_time: Any = None,
-        di_time: Any = None,
-        start_bi_index: Optional[int] = None,
-        end_bi_index: Optional[int] = None,
+        start_bi: SimpleBi,
+        end_bi: SimpleBi,
+        bi_list: List[SimpleBi],
+        is_done: bool = True,
     ):
         self.index = index
         self.type = direction
+        self._is_done = is_done
         
-        # 线段覆盖的笔索引范围（用于力度计算）
-        self.start_bi_index = start_bi_index
-        self.end_bi_index = end_bi_index
+        # 线段覆盖的笔
+        self.bi_list = bi_list
+        self.start_bi_index = start_bi.index
+        self.end_bi_index = end_bi.index
         
-        # 基本时间与价格信息
-        self.start_time = start_time
-        self.end_time = end_time
-        self.start_price = start_price
-        self.end_price = end_price
+        # 时间与价格信息
+        self.start_time = start_bi.start_time
+        self.end_time = end_bi.end_time
+        self.start_price = start_bi.start_price
+        self.end_price = end_bi.end_price
         
-        # mapper.py 需要的分型结构
-        start_kline = SimpleKline(start_time, start_price, start_price, start_price)
-        end_kline = SimpleKline(end_time, end_price, end_price, end_price)
-        self.start = SimpleFX(start_time, start_price, start_kline)
-        self.end = SimpleFX(end_time, end_price, end_kline)
+        # 兼容 mapper.py 的分型结构
+        start_kline = SimpleKline(self.start_time, self.start_price, self.start_price, self.start_price)
+        end_kline = SimpleKline(self.end_time, self.end_price, self.end_price, self.end_price)
+        self.start = SimpleFX("di" if direction == "up" else "ding", 0, None, self.start_price, self.start_time)
+        self.end = SimpleFX("ding" if direction == "up" else "di", 0, None, self.end_price, self.end_time)
         
-        # 高低点
+        # 高低点和分型
         if direction == "up":
-            self.high = end_price
-            self.low = start_price
-            self.ding_fx = SimpleFX(ding_time or end_time, end_price, end_kline)
-            self.di_fx = SimpleFX(di_time or start_time, start_price, start_kline)
+            self.high = self.end_price
+            self.low = self.start_price
+            self.ding_fx = self.end
+            self.di_fx = self.start
         else:
-            self.high = start_price
-            self.low = end_price
-            self.ding_fx = SimpleFX(ding_time or start_time, start_price, start_kline)
-            self.di_fx = SimpleFX(di_time or end_time, end_price, end_kline)
+            self.high = self.start_price
+            self.low = self.end_price
+            self.ding_fx = self.start
+            self.di_fx = self.end
         
-        # 力度（MACD 柱子之和），默认 0
+        # 力度
         self.strength: float = 0.0
         
         # 买卖点和背驰列表
         self.mmds: List[Any] = []
         self.bcs: List[Any] = []
     
+    def is_done(self) -> bool:
+        return self._is_done
+    
     def __repr__(self) -> str:
         return (
             f"<SimpleXD index={self.index} type={self.type} "
-            f"start={self.start_price} end={self.end_price}>"
+            f"start={self.start_price:.2f} end={self.end_price:.2f} bis={len(self.bi_list)}>"
         )
 
+
 class SimpleZS:
-    """简化的中枢对象（完整版）"""
+    """中枢对象（改进版）"""
     def __init__(
         self,
         index: int,
@@ -168,61 +220,68 @@ class SimpleZS:
         direction: str,
         start_time: Any,
         end_time: Any,
-        high: float,
-        low: float,
+        zg: float,
+        zd: float,
+        gg: float,
+        dd: float,
         level: int = 1,
-        relation: str = "expand",
+        relation: str = "new",
+        bi_count: int = 0,
     ):
         self.index = index
         self.zs_type = zs_type  # "bi" 笔中枢 / "xd" 线段中枢
-        self.direction = direction  # "up" / "down"
+        self.direction = direction  # "up" / "down" / "zd"（震荡）
         
         # 时间信息
         self.start_time = start_time
         self.end_time = end_time
         
-        # 价格信息
-        self.high = high
-        self.low = low
+        # 中枢的四个关键价格
+        self.zg = zg  # 中枢高点（ZG）
+        self.zd = zd  # 中枢低点（ZD）
+        self.gg = gg  # 高高点（GG）
+        self.dd = dd  # 低低点（DD）
         
-        # 中枢的四个关键价格（兼容 mapper.py）
-        self.zg = high  # 中枢高点
-        self.zd = low   # 中枢低点
-        self.gg = high  # 高高点
-        self.dd = low   # 低低点
+        # 兼容旧版字段
+        self.high = zg
+        self.low = zd
+        self.type = direction
         
-        # 中枢类型（兼容 mapper.py）
-        self.type = direction  # "up" / "down" / "zd"（震荡）
-        
-        # 中枢等级和状态
+        # 中枢状态
         self.level = level
-        self.relation = relation
-        self.done = True   # 中枢是否完成
-        self.real = True   # 是否为真实中枢
+        self.relation = relation  # "new" / "extend" / "up_trend" / "down_trend"
+        self.bi_count = bi_count
+        self.done = True
+        self.real = True
     
     def __repr__(self) -> str:
         return (
             f"<SimpleZS index={self.index} type={self.zs_type} "
-            f"direction={self.direction} zg={self.zg:.2f} zd={self.zd:.2f}>"
+            f"direction={self.direction} ZG={self.zg:.2f} ZD={self.zd:.2f} "
+            f"GG={self.gg:.2f} DD={self.dd:.2f}>"
         )
 
+
 class SimpleBC:
-    """简化的背驰对象"""
+    """背驰对象"""
     def __init__(
         self,
         bc_type: str,
         is_bc: bool = True,
-        zs: Optional[SimpleZS] = None
+        zs: Optional[SimpleZS] = None,
+        compare_item: Any = None,
     ):
         self.type = bc_type  # "bi" / "xd" / "zsd" / "pz" / "qs"
-        self.bc = is_bc      # 是否背驰
-        self.zs = zs         # 相关中枢
+        self.bc = is_bc
+        self.zs = zs
+        self.compare_item = compare_item  # 对比的笔/线段
     
     def __repr__(self) -> str:
         return f"<SimpleBC type={self.type} is_bc={self.bc}>"
 
+
 class SimpleMMD:
-    """简化的买卖点对象"""
+    """买卖点对象"""
     def __init__(
         self,
         name: str,
@@ -230,37 +289,42 @@ class SimpleMMD:
         msg: Optional[str] = None
     ):
         self.name = name  # "1buy"/"2buy"/"3buy"/"1sell"/"2sell"/"3sell"
-        self.zs = zs      # 相关中枢
-        self.msg = msg    # 说明信息
+        self.zs = zs
+        self.msg = msg
     
     def __repr__(self) -> str:
         return f"<SimpleMMD name={self.name} msg={self.msg}>"
 
+
+# ============================================================
+# 缠论引擎核心类（改进版）
+# ============================================================
+
 class SimpleICL:
-    """简化的 ICL 对象（自实现缠论引擎）
+    """缠论引擎核心类（改进版 v2.0）
     
-    这是一个占位实现，用于：
-    1. 提供基本的缠论结构计算功能
-    2. 提供统一的接口（get_bis/get_xds 等）
-    3. 后续可以替换为更完整的缠论算法实现
-    
-    当前实现的算法简化逻辑：
-    - 分型：使用 3 根 K 线识别顶分型/底分型
-    - 笔：根据分型生成，满足最小 K 线数要求
-    - 线段：根据笔生成，满足最小笔数要求
-    - 中枢：识别笔/线段的震荡区间
-    - 买卖点/背驰：未实现（返回空列表）
+    改进内容：
+    1. K线包含关系处理
+    2. 严格的分型识别
+    3. 正确的笔划分
+    4. 基于特征序列的线段划分
+    5. 完善的中枢计算
+    6. 多维度背驰判断
     """
     
     def __init__(self, code: str, frequency: str, config: Dict[str, Any]):
         self.code = code
         self.frequency = frequency
-        self.config = config
+        self.config = config or {}
         
-        # 算法参数（从 config 中读取，或使用默认值）
-        self.bi_min_kline = config.get('bi_min_kline', 5)  # 笔的最小 K 线数量
-        self.xd_min_bi = config.get('xd_min_bi', 3)  # 线段的最小笔数量
-        self.zs_min_bi = config.get('zs_min_bi', 3)  # 中枢的最小笔数量
+        # 算法参数
+        self.bi_min_kline = self.config.get('bi_min_kline', 4)  # 笔的最小K线数量（合并后）
+        self.xd_min_bi = self.config.get('xd_min_bi', 3)  # 线段的最小笔数量
+        self.zs_min_bi = self.config.get('zs_min_bi', 3)  # 中枢的最小笔数量
+        
+        # 中间结果
+        self._merged_klines: List[MergedKline] = []
+        self._fx_list: List[SimpleFX] = []
         
         # 缠论结构结果
         self._bis: List[SimpleBi] = []
@@ -268,21 +332,26 @@ class SimpleICL:
         self._bi_zss: List[SimpleZS] = []
         self._xd_zss: List[SimpleZS] = []
         self._zsd_zss: List[SimpleZS] = []
+        
+        # 原始数据
+        self._raw_df: pd.DataFrame = None
     
     def process_klines(self, df: pd.DataFrame) -> "SimpleICL":
         """对 K 线进行缠论结构计算
         
         计算流程：
-        1. 计算分型（顶分型/底分型）
-        2. 根据分型生成笔
-        3. 根据笔生成线段
-        4. 计算笔中枢和线段中枢
-        5. 计算买卖点和背驰（简化实现中未实现）
+        1. K线包含关系处理（合并K线）
+        2. 在合并K线上识别分型
+        3. 根据分型生成笔
+        4. 根据笔生成线段（特征序列法）
+        5. 计算中枢
+        6. 计算买卖点和背驰
         """
-        kline_count = len(df)
-        
-        if kline_count == 0:
+        if len(df) == 0:
             return self
+        
+        # 保存原始数据
+        self._raw_df = df.copy()
         
         # 确保 df 有必要的字段
         required_cols = ['date', 'open', 'high', 'low', 'close']
@@ -290,675 +359,1031 @@ class SimpleICL:
             if col not in df.columns:
                 raise ValueError(f"缺少必须字段: {col}")
         
-        # 1. 计算分型
-        fx_list = self._calculate_fx(df)
+        # 1. K线包含关系处理
+        self._merged_klines = self._merge_klines(df)
+        logger.debug(f"合并K线: {len(df)} -> {len(self._merged_klines)}")
         
-        # 2. 根据分型生成笔
-        self._bis = self._calculate_bi(df, fx_list)
+        # 2. 识别分型
+        self._fx_list = self._calculate_fx(self._merged_klines)
+        logger.debug(f"识别分型: {len(self._fx_list)} 个")
         
-        # 3. 根据笔生成线段
+        # 3. 生成笔
+        self._bis = self._calculate_bi(self._fx_list, self._merged_klines)
+        logger.debug(f"生成笔: {len(self._bis)} 笔")
+        
+        # 4. 计算笔的力度
+        self._calculate_bi_strength(df)
+        
+        # 5. 生成线段
         self._xds = self._calculate_xd(self._bis)
+        logger.debug(f"生成线段: {len(self._xds)} 段")
         
-        # 3.5 计算笔和线段的力度（MACD 柱子之和）
-        self._calculate_strengths(df)
+        # 6. 计算线段力度
+        self._calculate_xd_strength()
         
-        # 4. 计算中枢
+        # 7. 计算中枢
         self._bi_zss = self._calculate_zs(self._bis, "bi")
-        self._xd_zss = self._calculate_zs(self._xds, "xd")
+        self._xd_zss = self._calculate_zs_from_xd(self._xds, "xd")
+        logger.debug(f"笔中枢: {len(self._bi_zss)}, 线段中枢: {len(self._xd_zss)}")
         
-        # 5. 计算买卖点和背驰（简化实现：生成模拟数据）
+        # 8. 计算买卖点和背驰
         self._calculate_mmds_and_bcs()
         
         return self
     
-    def _calculate_fx(self, df: pd.DataFrame) -> List[Dict[str, Any]]:
-        """计算分型（顶分型和底分型）
+    # ========================================
+    # 1. K线包含关系处理
+    # ========================================
+    
+    def _merge_klines(self, df: pd.DataFrame) -> List[MergedKline]:
+        """处理K线包含关系
         
-        简化逻辑：
-        - 顶分型：中间 K 线高点最高，且低点也高于两侧
-        - 底分型：中间 K 线低点最低，且高点也低于两侧
+        包含关系定义：
+        - 当前K线的高低点完全在前一K线的高低点范围内，或反之
+        - 即：(H1 >= H2 and L1 <= L2) 或 (H2 >= H1 and L2 <= L1)
         
-        返回：
-        - 分型列表，每个分型包含 type/index/time/price
+        合并规则：
+        - 向上趋势：取两根K线的 max(high), max(low)
+        - 向下趋势：取两根K线的 min(high), min(low)
+        
+        趋势判断：
+        - 比较合并后的最新K线与前一K线的高点
         """
-        fx_list = []
+        if len(df) < 2:
+            return [MergedKline(
+                index=0,
+                date=df.iloc[0]['date'],
+                high=float(df.iloc[0]['high']),
+                low=float(df.iloc[0]['low']),
+                open_price=float(df.iloc[0]['open']),
+                close=float(df.iloc[0]['close']),
+                raw_indices=[0],
+            )] if len(df) == 1 else []
         
-        for i in range(1, len(df) - 1):
-            prev = df.iloc[i - 1]
-            curr = df.iloc[i]
-            next_ = df.iloc[i + 1]
+        merged: List[MergedKline] = []
+        
+        # 第一根K线直接加入
+        first = df.iloc[0]
+        merged.append(MergedKline(
+            index=0,
+            date=first['date'],
+            high=float(first['high']),
+            low=float(first['low']),
+            open_price=float(first['open']),
+            close=float(first['close']),
+            raw_indices=[0],
+        ))
+        
+        for i in range(1, len(df)):
+            row = df.iloc[i]
+            curr_high = float(row['high'])
+            curr_low = float(row['low'])
             
-            # 顶分型：中间高点最高
-            if (
-                curr["high"] > prev["high"] and
-                curr["high"] > next_["high"] and
-                curr["low"] >= prev["low"]  # 简化条件
-            ):
-                fx_list.append({
-                    "type": "ding",
-                    "index": i,
-                    "time": curr["date"],
-                    "price": curr["high"],
-                    "kline": curr,
-                })
+            prev = merged[-1]
+            prev_high = prev.high
+            prev_low = prev.low
             
-            # 底分型：中间低点最低
-            elif (
-                curr["low"] < prev["low"] and
-                curr["low"] < next_["low"] and
-                curr["high"] <= prev["high"]  # 简化条件
-            ):
-                fx_list.append({
-                    "type": "di",
-                    "index": i,
-                    "time": curr["date"],
-                    "price": curr["low"],
-                    "kline": curr,
-                })
+            # 检查是否存在包含关系
+            has_contain = (
+                (curr_high <= prev_high and curr_low >= prev_low) or  # 当前被前一个包含
+                (curr_high >= prev_high and curr_low <= prev_low)     # 当前包含前一个
+            )
+            
+            if has_contain:
+                # 确定趋势方向
+                if len(merged) >= 2:
+                    direction = "up" if merged[-1].high > merged[-2].high else "down"
+                else:
+                    # 只有一根K线时，看当前K线的趋势
+                    direction = "up" if curr_high > prev_high or curr_low > prev_low else "down"
+                
+                # 合并K线
+                if direction == "up":
+                    # 向上趋势：取高高、高低
+                    new_high = max(curr_high, prev_high)
+                    new_low = max(curr_low, prev_low)
+                else:
+                    # 向下趋势：取低高、低低
+                    new_high = min(curr_high, prev_high)
+                    new_low = min(curr_low, prev_low)
+                
+                # 更新最后一根合并K线
+                prev.high = new_high
+                prev.low = new_low
+                prev.raw_indices.append(i)
+                # 保持日期为最后一根的日期
+                prev.date = row['date']
+            else:
+                # 无包含关系，直接添加新K线
+                merged.append(MergedKline(
+                    index=len(merged),
+                    date=row['date'],
+                    high=curr_high,
+                    low=curr_low,
+                    open_price=float(row['open']),
+                    close=float(row['close']),
+                    raw_indices=[i],
+                ))
+        
+        return merged
+    
+    # ========================================
+    # 2. 分型识别
+    # ========================================
+    
+    def _calculate_fx(self, klines: List[MergedKline]) -> List[SimpleFX]:
+        """在合并后的K线上识别分型
+        
+        顶分型：中间K线的高点是三根K线中最高的
+        底分型：中间K线的低点是三根K线中最低的
+        
+        严格条件：
+        - 顶分型：k[i].high > k[i-1].high AND k[i].high > k[i+1].high
+        - 底分型：k[i].low < k[i-1].low AND k[i].low < k[i+1].low
+        """
+        if len(klines) < 3:
+            return []
+        
+        fx_list: List[SimpleFX] = []
+        
+        for i in range(1, len(klines) - 1):
+            prev = klines[i - 1]
+            curr = klines[i]
+            next_ = klines[i + 1]
+            
+            # 顶分型判断（严格大于）
+            if curr.high > prev.high and curr.high > next_.high:
+                fx = SimpleFX(
+                    fx_type="ding",
+                    index=i,
+                    kline=curr,
+                    price=curr.high,
+                    time=curr.date,
+                    raw_index=curr.raw_indices[-1] if curr.raw_indices else i,
+                )
+                fx_list.append(fx)
+            
+            # 底分型判断（严格小于）
+            elif curr.low < prev.low and curr.low < next_.low:
+                fx = SimpleFX(
+                    fx_type="di",
+                    index=i,
+                    kline=curr,
+                    price=curr.low,
+                    time=curr.date,
+                    raw_index=curr.raw_indices[-1] if curr.raw_indices else i,
+                )
+                fx_list.append(fx)
         
         return fx_list
     
-    def _calculate_bi(self, df: pd.DataFrame, fx_list: List[Dict[str, Any]]) -> List[SimpleBi]:
+    # ========================================
+    # 3. 笔的生成
+    # ========================================
+    
+    def _calculate_bi(
+        self,
+        fx_list: List[SimpleFX],
+        klines: List[MergedKline]
+    ) -> List[SimpleBi]:
         """根据分型生成笔
         
-        简化逻辑：
-        - 从顶分型到底分型生成下笔
-        - 从底分型到顶分型生成上笔
-        - 需要满足最小 K 线数要求
-        - 需要保证相邻笔的方向不同
+        笔的定义：
+        1. 从顶分型到底分型，或从底分型到顶分型
+        2. 两个分型之间至少有 bi_min_kline 根独立K线（不含分型的共用K线）
+        3. 顶底分型必须交替出现
+        
+        特殊处理：
+        - 同类型分型之间，保留更极端的那个
+        - 笔的延伸：如果后续出现更高的顶或更低的底，延伸笔
         """
         if len(fx_list) < 2:
             return []
         
-        bis = []
+        # 第一步：过滤和修正分型，确保顶底交替且选择最极端的
+        filtered_fx = self._filter_fx_alternating(fx_list)
+        
+        if len(filtered_fx) < 2:
+            return []
+        
+        # 第二步：生成笔
+        bis: List[SimpleBi] = []
         bi_index = 0
         
-        # 从第一个分型开始遍历
-        for i in range(len(fx_list) - 1):
-            fx_start = fx_list[i]
-            fx_end = fx_list[i + 1]
+        i = 0
+        while i < len(filtered_fx) - 1:
+            start_fx = filtered_fx[i]
+            end_fx = filtered_fx[i + 1]
             
-            # 检查 K 线数量
-            kline_count = fx_end["index"] - fx_start["index"]
+            # 检查分型之间的K线数量
+            kline_count = end_fx.index - start_fx.index
             if kline_count < self.bi_min_kline:
+                # K线数量不足，跳过这对分型
+                i += 1
                 continue
             
-            # 判断笔的方向
-            if fx_start["type"] == "di" and fx_end["type"] == "ding":
-                # 上笔
+            # 确定笔的方向
+            if start_fx.type == "di" and end_fx.type == "ding":
                 direction = "up"
-            elif fx_start["type"] == "ding" and fx_end["type"] == "di":
-                # 下笔
+            elif start_fx.type == "ding" and end_fx.type == "di":
                 direction = "down"
             else:
-                # 同类型分型，跳过
+                # 不应该发生（经过 filter 后应该是交替的）
+                i += 1
                 continue
             
-            # 检查与上一笔的方向是否一致（需要交替）
-            if bis and bis[-1].type == direction:
-                continue
+            # 检查是否需要延伸笔
+            # 向后查找是否有更极端的分型
+            actual_end_fx = end_fx
+            j = i + 2
+            while j < len(filtered_fx):
+                next_fx = filtered_fx[j]
+                if direction == "up" and next_fx.type == "ding":
+                    # 向上笔，检查是否有更高的顶
+                    if next_fx.val > actual_end_fx.val:
+                        actual_end_fx = next_fx
+                        j += 1
+                    else:
+                        break
+                elif direction == "down" and next_fx.type == "di":
+                    # 向下笔，检查是否有更低的底
+                    if next_fx.val < actual_end_fx.val:
+                        actual_end_fx = next_fx
+                        j += 1
+                    else:
+                        break
+                else:
+                    break
             
-            # 生成笔
+            # 创建笔
+            # 获取原始K线索引
+            start_raw_idx = start_fx.raw_index
+            end_raw_idx = actual_end_fx.raw_index
+            
             bi = SimpleBi(
                 index=bi_index,
                 direction=direction,
-                start_time=fx_start["time"],
-                end_time=fx_end["time"],
-                start_price=fx_start["price"],
-                end_price=fx_end["price"],
-                start_index=fx_start["index"],
-                end_index=fx_end["index"],
+                start_fx=start_fx,
+                end_fx=actual_end_fx,
+                start_index=start_raw_idx,
+                end_index=end_raw_idx,
+                is_done=True,
             )
+            
+            # 检查与上一笔的方向是否交替
+            if bis and bis[-1].type == direction:
+                # 方向相同，需要合并或选择
+                # 如果方向相同，说明有问题，跳过
+                i += 1
+                continue
+            
             bis.append(bi)
             bi_index += 1
+            
+            # 移动到结束分型的位置
+            # 找到 actual_end_fx 在 filtered_fx 中的索引
+            try:
+                next_i = filtered_fx.index(actual_end_fx)
+                i = next_i
+            except ValueError:
+                i += 1
+        
+        # 最后一笔可能未完成
+        if bis and len(filtered_fx) > 0:
+            last_fx = filtered_fx[-1]
+            if bis[-1].end_fx != last_fx:
+                bis[-1]._is_done = False
         
         return bis
     
-    def _calculate_strengths(self, df: pd.DataFrame) -> None:
-        """计算笔和线段的力度（基于 MACD 柱子之和）"""
-        if not self._bis:
+    def _filter_fx_alternating(self, fx_list: List[SimpleFX]) -> List[SimpleFX]:
+        """过滤分型，确保顶底交替，同类型分型保留最极端的
+        
+        算法：
+        1. 遍历所有分型
+        2. 如果与前一个分型类型相同，保留更极端的
+        3. 如果类型不同，直接添加
+        """
+        if not fx_list:
+            return []
+        
+        result: List[SimpleFX] = [fx_list[0]]
+        
+        for fx in fx_list[1:]:
+            last = result[-1]
+            
+            if fx.type == last.type:
+                # 同类型，保留更极端的
+                if fx.type == "ding":
+                    # 顶分型，保留更高的
+                    if fx.val > last.val:
+                        result[-1] = fx
+                else:
+                    # 底分型，保留更低的
+                    if fx.val < last.val:
+                        result[-1] = fx
+            else:
+                # 类型不同，添加
+                result.append(fx)
+        
+        return result
+    
+    # ========================================
+    # 4. 笔的力度计算
+    # ========================================
+    
+    def _calculate_bi_strength(self, df: pd.DataFrame) -> None:
+        """计算笔的力度（多维度）
+        
+        力度计算包括：
+        1. MACD 力度：MACD 柱子面积
+        2. 价格力度：价格变化幅度
+        3. 斜率力度：单位时间价格变化
+        """
+        if not self._bis or df is None or len(df) == 0:
             return
         
+        # 计算 MACD
         close = df["close"].astype(float)
-        # 典型 MACD 参数：12, 26, 9
         ema_short = close.ewm(span=12, adjust=False).mean()
         ema_long = close.ewm(span=26, adjust=False).mean()
         dif = ema_short - ema_long
         dea = dif.ewm(span=9, adjust=False).mean()
-        macd_hist = (dif - dea) * 2  # 与常规 MACD 保持一致
+        macd_hist = (dif - dea) * 2
         hist_values = macd_hist.to_list()
         n = len(hist_values)
         
-        # 1) 为每一笔计算力度
         for bi in self._bis:
-            start_idx = getattr(bi, "start_index", None)
-            end_idx = getattr(bi, "end_index", None)
+            start_idx = bi.start_index
+            end_idx = bi.end_index
+            
             if start_idx is None or end_idx is None:
-                bi.strength = 0.0
                 continue
+            
             s = max(0, min(start_idx, end_idx))
             e = min(n - 1, max(start_idx, end_idx))
-            segment = hist_values[s : e + 1]
+            segment = hist_values[s:e + 1]
+            
+            # 1. MACD 力度
             if bi.type == "up":
-                bi.strength = float(sum(v for v in segment if v > 0))
+                bi.macd_strength = float(sum(abs(v) for v in segment if v > 0))
             else:
-                bi.strength = float(sum(-v for v in segment if v < 0))
-        
-        # 2) 为每一线段计算力度（笔力度之和）
-        for xd in self._xds:
-            start_bi_index = getattr(xd, "start_bi_index", None)
-            end_bi_index = getattr(xd, "end_bi_index", None)
-            if start_bi_index is None or end_bi_index is None:
-                xd.strength = 0.0
-                continue
-            s = max(0, min(start_bi_index, end_bi_index))
-            e = min(len(self._bis) - 1, max(start_bi_index, end_bi_index))
-            xd.strength = float(sum(self._bis[i].strength for i in range(s, e + 1)))
+                bi.macd_strength = float(sum(abs(v) for v in segment if v < 0))
+            
+            # 2. 价格力度
+            bi.price_strength = abs(bi.end_price - bi.start_price)
+            
+            # 3. 斜率力度
+            kline_count = abs(e - s) + 1
+            bi.slope_strength = bi.price_strength / max(kline_count, 1)
+            
+            # 综合力度（加权平均）
+            bi.strength = (
+                0.5 * bi.macd_strength +
+                0.3 * bi.price_strength +
+                0.2 * bi.slope_strength * 100  # 斜率需要放大
+            )
+    
+    # ========================================
+    # 5. 线段的生成（特征序列法）
+    # ========================================
     
     def _calculate_xd(self, bis: List[SimpleBi]) -> List[SimpleXD]:
-        """根据笔生成线段
+        """根据笔生成线段（基于特征序列分型）
         
-        简化逻辑：
-        - 将连续的同方向笔合并为线段
-        - 需要满足最小笔数要求
+        线段定义：
+        1. 线段由至少3笔组成
+        2. 线段的结束需要特征序列出现反向分型
+        
+        特征序列：
+        - 向上线段：取所有向下笔的高低点作为特征序列
+        - 向下线段：取所有向上笔的高低点作为特征序列
+        
+        线段破坏条件：
+        - 特征序列出现反向分型（底分型结束向上线段，顶分型结束向下线段）
         """
-        if len(bis) < self.xd_min_bi:
+        if len(bis) < 3:
             return []
         
-        xds = []
+        xds: List[SimpleXD] = []
         xd_index = 0
-        i = 0
+        
+        # 确定第一个线段的方向（使用前3笔）
+        # 如果是上下上，则是向上线段；如果是下上下，则是向下线段
+        if bis[0].type == "up":
+            # 上下上...开始，第一个线段是向上的
+            current_direction = "up"
+            start_bi_idx = 0
+        else:
+            # 下上下...开始，第一个线段是向下的
+            current_direction = "down"
+            start_bi_idx = 0
+        
+        i = start_bi_idx + 2  # 从第3笔开始检查
         
         while i < len(bis):
-            start_bi = bis[i]
-            direction = start_bi.type
+            # 收集当前线段的笔
+            segment_bis = bis[start_bi_idx:i + 1]
             
-            # 找到方向变化的位置
-            j = i + 1
-            while j < len(bis) and bis[j].type == direction:
-                j += 1
+            if len(segment_bis) < 3:
+                i += 1
+                continue
             
-            # 检查笔数
-            bi_count = j - i
-            if bi_count >= self.xd_min_bi:
-                end_bi = bis[j - 1]
+            # 构建特征序列
+            features = self._build_feature_sequence(segment_bis, current_direction)
+            
+            # 检查特征序列是否出现反向分型
+            fx_type, fx_index = self._check_feature_fx(features, current_direction)
+            
+            if fx_type is not None:
+                # 找到反向分型，线段结束
+                # 确定线段结束的笔
+                end_bi = segment_bis[-1]
                 
-                # 生成线段
+                # 如果是向上线段，找到最高点对应的笔
+                if current_direction == "up":
+                    max_price = max(b.end_price for b in segment_bis if b.type == "up")
+                    for b in reversed(segment_bis):
+                        if b.type == "up" and b.end_price == max_price:
+                            end_bi = b
+                            break
+                else:
+                    min_price = min(b.end_price for b in segment_bis if b.type == "down")
+                    for b in reversed(segment_bis):
+                        if b.type == "down" and b.end_price == min_price:
+                            end_bi = b
+                            break
+                
+                # 创建线段
+                start_bi = bis[start_bi_idx]
                 xd = SimpleXD(
                     index=xd_index,
-                    direction=direction,
-                    start_time=start_bi.start_time,
-                    end_time=end_bi.end_time,
-                    start_price=start_bi.start_price,
-                    end_price=end_bi.end_price,
-                    ding_time=end_bi.end_time if direction == "up" else start_bi.start_time,
-                    di_time=start_bi.start_time if direction == "up" else end_bi.end_time,
-                    start_bi_index=i,
-                    end_bi_index=j - 1,
+                    direction=current_direction,
+                    start_bi=start_bi,
+                    end_bi=end_bi,
+                    bi_list=segment_bis[:segment_bis.index(end_bi) + 1] if end_bi in segment_bis else segment_bis,
+                    is_done=True,
                 )
                 xds.append(xd)
                 xd_index += 1
-            
-            i = j if j > i else i + 1
+                
+                # 切换方向，更新起始位置
+                current_direction = "down" if current_direction == "up" else "up"
+                # 新线段从结束点开始
+                try:
+                    start_bi_idx = bis.index(end_bi)
+                except ValueError:
+                    start_bi_idx = i
+                i = start_bi_idx + 2
+            else:
+                i += 1
+        
+        # 处理最后可能未完成的线段
+        if start_bi_idx < len(bis) - 2:
+            remaining_bis = bis[start_bi_idx:]
+            if len(remaining_bis) >= 3:
+                start_bi = remaining_bis[0]
+                end_bi = remaining_bis[-1]
+                
+                # 确定实际结束笔
+                if current_direction == "up":
+                    max_price = max(b.end_price for b in remaining_bis if b.type == "up")
+                    for b in reversed(remaining_bis):
+                        if b.type == "up" and b.end_price == max_price:
+                            end_bi = b
+                            break
+                else:
+                    min_price = min(b.end_price for b in remaining_bis if b.type == "down")
+                    for b in reversed(remaining_bis):
+                        if b.type == "down" and b.end_price == min_price:
+                            end_bi = b
+                            break
+                
+                xd = SimpleXD(
+                    index=xd_index,
+                    direction=current_direction,
+                    start_bi=start_bi,
+                    end_bi=end_bi,
+                    bi_list=remaining_bis,
+                    is_done=False,  # 未完成的线段
+                )
+                xds.append(xd)
         
         return xds
     
-    def _calculate_zs(self, items: List[Any], level: str) -> List[SimpleZS]:
-        """计算中枢（修复版）
+    def _build_feature_sequence(
+        self,
+        bis: List[SimpleBi],
+        direction: str
+    ) -> List[Tuple[float, float]]:
+        """构建特征序列
         
-        缠论中枢定义：
-        - 至少 3 个连续的笔/线段有重叠区间
-        - 中枢是笔的「结束价」的重叠区间
-        - 对于笔：
-          - 上笔：从 start_price(低) 到 end_price(高)
-          - 下笔：从 start_price(高) 到 end_price(低)
-        - zg (中枢高点): 前 3 个笔的最低的顶部
-        - zd (中枢低点): 前 3 个笔的最高的底部
-        - gg (高高点): 中枢内所有笔的最高点
-        - dd (低低点): 中枢内所有笔的最低点
+        向上线段：取向下笔作为特征序列，每笔的(high, low)
+        向下线段：取向上笔作为特征序列，每笔的(high, low)
+        """
+        features = []
+        
+        for bi in bis:
+            if direction == "up" and bi.type == "down":
+                # 向上线段，取向下笔
+                features.append((bi.high, bi.low))
+            elif direction == "down" and bi.type == "up":
+                # 向下线段，取向上笔
+                features.append((bi.high, bi.low))
+        
+        return features
+    
+    def _check_feature_fx(
+        self,
+        features: List[Tuple[float, float]],
+        direction: str
+    ) -> Tuple[Optional[str], Optional[int]]:
+        """检查特征序列是否出现反向分型
+        
+        向上线段等待底分型：三个特征元素，中间的low最低
+        向下线段等待顶分型：三个特征元素，中间的high最高
+        
+        返回：(分型类型, 分型索引) 或 (None, None)
+        """
+        if len(features) < 3:
+            return None, None
+        
+        # 处理特征序列的包含关系
+        merged_features = self._merge_features(features, direction)
+        
+        if len(merged_features) < 3:
+            return None, None
+        
+        # 检查最后三个特征元素
+        for i in range(len(merged_features) - 2):
+            f1 = merged_features[i]
+            f2 = merged_features[i + 1]
+            f3 = merged_features[i + 2]
+            
+            if direction == "up":
+                # 向上线段，等待底分型（中间最低）
+                if f2[1] < f1[1] and f2[1] < f3[1]:
+                    return "di", i + 1
+            else:
+                # 向下线段，等待顶分型（中间最高）
+                if f2[0] > f1[0] and f2[0] > f3[0]:
+                    return "ding", i + 1
+        
+        return None, None
+    
+    def _merge_features(
+        self,
+        features: List[Tuple[float, float]],
+        direction: str
+    ) -> List[Tuple[float, float]]:
+        """处理特征序列的包含关系"""
+        if len(features) < 2:
+            return features
+        
+        merged = [features[0]]
+        
+        for feat in features[1:]:
+            prev = merged[-1]
+            
+            # 检查包含关系
+            has_contain = (
+                (feat[0] <= prev[0] and feat[1] >= prev[1]) or
+                (feat[0] >= prev[0] and feat[1] <= prev[1])
+            )
+            
+            if has_contain:
+                # 根据线段方向决定合并方式
+                if direction == "up":
+                    # 向上线段，特征序列向下，取低低
+                    new_high = min(feat[0], prev[0])
+                    new_low = min(feat[1], prev[1])
+                else:
+                    # 向下线段，特征序列向上，取高高
+                    new_high = max(feat[0], prev[0])
+                    new_low = max(feat[1], prev[1])
+                merged[-1] = (new_high, new_low)
+            else:
+                merged.append(feat)
+        
+        return merged
+    
+    # ========================================
+    # 6. 线段力度计算
+    # ========================================
+    
+    def _calculate_xd_strength(self) -> None:
+        """计算线段的力度"""
+        for xd in self._xds:
+            # 线段力度 = 包含的笔的力度之和
+            xd.strength = sum(bi.strength for bi in xd.bi_list)
+    
+    # ========================================
+    # 7. 中枢计算
+    # ========================================
+    
+    def _calculate_zs(self, items: List[SimpleBi], level: str) -> List[SimpleZS]:
+        """计算笔中枢
+        
+        中枢定义：
+        - 至少3笔有重叠区间
+        - ZG = min(所有笔的高点)
+        - ZD = max(所有笔的低点)
+        - 必须 ZD < ZG 才形成中枢
         """
         if len(items) < self.zs_min_bi:
             return []
         
-        zss = []
+        zss: List[SimpleZS] = []
         zs_index = 0
         i = 0
         
-        def get_bi_range(bi: Any) -> tuple:
-            """获取笔的价格区间（低点、高点）"""
-            if bi.type == "up":
-                # 上笔：从低到高
-                return (bi.start_price, bi.end_price)
-            else:
-                # 下笔：从高到低
-                return (bi.end_price, bi.start_price)
+        def get_bi_range(bi: SimpleBi) -> Tuple[float, float]:
+            """获取笔的价格区间 (low, high)"""
+            return (bi.low, bi.high)
         
-        while i < len(items) - self.zs_min_bi + 1:
-            # 取连续 3 个项作为中枢的起始项
-            group = items[i:i + self.zs_min_bi]
+        while i <= len(items) - self.zs_min_bi:
+            # 取连续的笔尝试形成中枢
+            first_bis = items[i:i + self.zs_min_bi]
+            ranges = [get_bi_range(bi) for bi in first_bis]
             
-            # 计算重叠区间（使用笔的价格区间）
-            ranges = [get_bi_range(item) for item in group]
+            # 计算重叠区间
+            zd = max(r[0] for r in ranges)  # 所有低点的最大值
+            zg = min(r[1] for r in ranges)  # 所有高点的最小值
             
-            # 中枢高点 zg：所有笔的最低的高点
-            # 中枢低点 zd：所有笔的最高的低点
-            lows = [r[0] for r in ranges]
-            highs = [r[1] for r in ranges]
-            
-            zg = min(highs)  # 中枢高点：最低的高点
-            zd = max(lows)   # 中枢低点：最高的低点
-            
-            # 如果有重叠，则形成中枢
             if zd < zg:
-                # 扩展中枢：尝试将后续的项加入中枢
-                zs_items = list(group)
+                # 形成中枢，尝试扩展
+                zs_bis = list(first_bis)
                 j = i + self.zs_min_bi
                 
                 while j < len(items):
-                    next_item = items[j]
-                    next_low, next_high = get_bi_range(next_item)
+                    next_bi = items[j]
+                    next_low, next_high = get_bi_range(next_bi)
                     
-                    # 检查下一项是否与中枢重叠
-                    if next_low <= zg and next_high >= zd:
-                        zs_items.append(next_item)
+                    # 检查是否与中枢有重叠
+                    if next_low < zg and next_high > zd:
+                        zs_bis.append(next_bi)
                         j += 1
                     else:
                         break
                 
-                # 计算最终的 zg, zd, gg, dd
-                all_ranges = [get_bi_range(item) for item in zs_items]
-                all_lows = [r[0] for r in all_ranges]
-                all_highs = [r[1] for r in all_ranges]
+                # 计算最终的中枢参数
+                all_ranges = [get_bi_range(bi) for bi in zs_bis]
                 
-                # 重新计算 zg, zd (使用前 3 项)
-                first_three_ranges = all_ranges[:3]
-                first_three_lows = [r[0] for r in first_three_ranges]
-                first_three_highs = [r[1] for r in first_three_ranges]
-                zg = min(first_three_highs)
-                zd = max(first_three_lows)
+                # ZG, ZD 使用前3笔确定
+                first_three = all_ranges[:3]
+                zd = max(r[0] for r in first_three)
+                zg = min(r[1] for r in first_three)
                 
-                # 计算 gg, dd (使用所有项)
-                gg = max(all_highs)
-                dd = min(all_lows)
+                # GG, DD 使用所有笔
+                gg = max(r[1] for r in all_ranges)
+                dd = min(r[0] for r in all_ranges)
                 
-                # 判断中枢类型
+                # 判断中枢方向
                 if gg > zg and dd < zd:
-                    zs_type_name = "zd"  # 震荡
+                    direction = "zd"  # 震荡
                 elif gg > zg:
-                    zs_type_name = "up"  # 向上
+                    direction = "up"
                 elif dd < zd:
-                    zs_type_name = "down"  # 向下
+                    direction = "down"
                 else:
-                    zs_type_name = "zd"  # 默认震荡
+                    direction = "zd"
+                
+                # 计算与前一个中枢的关系
+                relation = "new"
+                if zss:
+                    prev_zs = zss[-1]
+                    if zd > prev_zs.zg:
+                        relation = "up_trend"
+                    elif zg < prev_zs.zd:
+                        relation = "down_trend"
+                    else:
+                        relation = "extend"
                 
                 zs = SimpleZS(
                     index=zs_index,
                     zs_type=level,
-                    direction=zs_type_name,
-                    start_time=zs_items[0].start_time,
-                    end_time=zs_items[-1].end_time,
-                    low=zd,
-                    high=zg,
+                    direction=direction,
+                    start_time=zs_bis[0].start_time,
+                    end_time=zs_bis[-1].end_time,
+                    zg=zg,
+                    zd=zd,
+                    gg=gg,
+                    dd=dd,
+                    level=1,
+                    relation=relation,
+                    bi_count=len(zs_bis),
                 )
-                # 手动设置 gg 和 dd
-                zs.zg = zg
-                zs.zd = zd
-                zs.gg = gg
-                zs.dd = dd
-                
                 zss.append(zs)
                 zs_index += 1
                 
-                # 跳过已处理的项
+                # 跳过已处理的笔
                 i = j
             else:
                 i += 1
         
         return zss
     
+    def _calculate_zs_from_xd(self, xds: List[SimpleXD], level: str) -> List[SimpleZS]:
+        """计算线段中枢"""
+        if len(xds) < self.zs_min_bi:
+            return []
+        
+        zss: List[SimpleZS] = []
+        zs_index = 0
+        i = 0
+        
+        def get_xd_range(xd: SimpleXD) -> Tuple[float, float]:
+            return (xd.low, xd.high)
+        
+        while i <= len(xds) - self.zs_min_bi:
+            first_xds = xds[i:i + self.zs_min_bi]
+            ranges = [get_xd_range(xd) for xd in first_xds]
+            
+            zd = max(r[0] for r in ranges)
+            zg = min(r[1] for r in ranges)
+            
+            if zd < zg:
+                zs_xds = list(first_xds)
+                j = i + self.zs_min_bi
+                
+                while j < len(xds):
+                    next_xd = xds[j]
+                    next_low, next_high = get_xd_range(next_xd)
+                    
+                    if next_low < zg and next_high > zd:
+                        zs_xds.append(next_xd)
+                        j += 1
+                    else:
+                        break
+                
+                all_ranges = [get_xd_range(xd) for xd in zs_xds]
+                first_three = all_ranges[:3]
+                zd = max(r[0] for r in first_three)
+                zg = min(r[1] for r in first_three)
+                gg = max(r[1] for r in all_ranges)
+                dd = min(r[0] for r in all_ranges)
+                
+                if gg > zg and dd < zd:
+                    direction = "zd"
+                elif gg > zg:
+                    direction = "up"
+                elif dd < zd:
+                    direction = "down"
+                else:
+                    direction = "zd"
+                
+                relation = "new"
+                if zss:
+                    prev_zs = zss[-1]
+                    if zd > prev_zs.zg:
+                        relation = "up_trend"
+                    elif zg < prev_zs.zd:
+                        relation = "down_trend"
+                    else:
+                        relation = "extend"
+                
+                zs = SimpleZS(
+                    index=zs_index,
+                    zs_type=level,
+                    direction=direction,
+                    start_time=zs_xds[0].start_time,
+                    end_time=zs_xds[-1].end_time,
+                    zg=zg,
+                    zd=zd,
+                    gg=gg,
+                    dd=dd,
+                    level=1,
+                    relation=relation,
+                    bi_count=len(zs_xds),
+                )
+                zss.append(zs)
+                zs_index += 1
+                i = j
+            else:
+                i += 1
+        
+        return zss
+    
+    # ========================================
+    # 8. 买卖点和背驰计算
+    # ========================================
+    
     def _calculate_mmds_and_bcs(self) -> None:
-        """计算买卖点和背驰（真实算法）
-        
-        缠论背驰定义：
-        - 笔背驰：两笔之间的力度对比，后笔力度更弱
-        - 段背驰：两线段之间的力度对比，后段力度更弱
-        
-        买卖点定义：
-        - 一买/一卖：笔背驰 + 离开中枢
-        - 二买/二卖：线段背驰 + 离开中枢
-        - 三买/三卖：走势背驰 + 离开中枢
-        """
-        # 1. 计算笔的背驰和买卖点
+        """计算买卖点和背驰"""
+        # 1. 计算笔的背驰和一类买卖点
         self._calculate_bi_bcs_and_mmds()
         
-        # 2. 计算线段的背驰和买卖点
+        # 2. 计算线段的背驰和二类买卖点
         self._calculate_xd_bcs_and_mmds()
         
         # 3. 计算三类买卖点
-        self._calculate_xd_class3_mmds()
-        
-        # 4. 计算类二/类三买卖点
-        self._calculate_xd_like_class2_and_class3_mmds()
+        self._calculate_class3_mmds()
     
     def _calculate_bi_bcs_and_mmds(self) -> None:
-        """计算笔的背驰和买卖点"""
-        if len(self._bis) < 5:  # 至少需要 5 笔才能形成背驰
+        """计算笔的背驰和一类买卖点"""
+        if len(self._bis) < 5:
             return
         
-        # 遍历每个笔，检测背驰
-        for i in range(2, len(self._bis)):
+        for i in range(4, len(self._bis)):
             current_bi = self._bis[i]
             
-            # 查找前面同方向的笔
-            for j in range(i - 2, -1, -2):  # 每次跳 2 笔（同方向）
+            # 查找同向前笔（跳2笔）
+            for j in range(i - 2, -1, -2):
                 prev_bi = self._bis[j]
                 
                 if current_bi.type != prev_bi.type:
                     continue
                 
                 # 检测背驰
-                is_bc = self._check_bi_divergence(prev_bi, current_bi)
+                is_bc = self._check_divergence(prev_bi, current_bi)
                 
                 if is_bc:
                     # 查找相关中枢
                     related_zs = self._find_related_zs(current_bi, self._bi_zss)
                     
-                    # 添加背驰
+                    # 添加背驰标记
                     current_bi.bcs.append(SimpleBC(
                         bc_type="bi",
                         is_bc=True,
-                        zs=related_zs
+                        zs=related_zs,
+                        compare_item=prev_bi,
                     ))
                     
-                    # 判断是否为买卖点
+                    # 判断一类买卖点
                     if related_zs and self._is_leaving_zs(current_bi, related_zs):
                         if current_bi.type == "down":
-                            # 下笔背驰且离开中枢 -> 一买
                             current_bi.mmds.append(SimpleMMD(
                                 name="1buy",
                                 zs=related_zs,
                                 msg="笔背驰一买"
                             ))
                         else:
-                            # 上笔背驰且离开中枢 -> 一卖
                             current_bi.mmds.append(SimpleMMD(
                                 name="1sell",
                                 zs=related_zs,
                                 msg="笔背驰一卖"
                             ))
-                    
-                    break  # 找到背驰后跳出
+                    break
     
     def _calculate_xd_bcs_and_mmds(self) -> None:
-        """计算线段的背驰和买卖点"""
+        """计算线段的背驰和二类买卖点"""
         if len(self._xds) < 3:
             return
         
-        # 遍历每个线段，检测背驰
         for i in range(2, len(self._xds)):
             current_xd = self._xds[i]
             
-            # 查找前面同方向的线段
             for j in range(i - 2, -1, -2):
                 prev_xd = self._xds[j]
                 
                 if current_xd.type != prev_xd.type:
                     continue
                 
-                # 检测背驰
                 is_bc = self._check_xd_divergence(prev_xd, current_xd)
                 
                 if is_bc:
-                    # 查找相关中枢
-                    related_zs = self._find_related_zs(current_xd, self._xd_zss)
+                    related_zs = self._find_related_zs_for_xd(current_xd, self._xd_zss)
                     
-                    # 添加背驰
                     current_xd.bcs.append(SimpleBC(
                         bc_type="xd",
                         is_bc=True,
-                        zs=related_zs
+                        zs=related_zs,
+                        compare_item=prev_xd,
                     ))
                     
-                    # 判断是否为买卖点
-                    if related_zs and self._is_leaving_zs(current_xd, related_zs):
+                    if related_zs and self._is_leaving_zs_for_xd(current_xd, related_zs):
                         if current_xd.type == "down":
-                            # 下线段背驰且离开中枢 -> 二买
                             current_xd.mmds.append(SimpleMMD(
                                 name="2buy",
                                 zs=related_zs,
                                 msg="线段背驰二买"
                             ))
                         else:
-                            # 上线段背驰且离开中枢 -> 二卖
                             current_xd.mmds.append(SimpleMMD(
                                 name="2sell",
                                 zs=related_zs,
                                 msg="线段背驰二卖"
                             ))
-                    
                     break
     
-    def _calculate_xd_class3_mmds(self) -> None:
-        """计算三类买卖点（基于线段和线段中枢）"""
-        if not self._xds or not self._xd_zss:
+    def _calculate_class3_mmds(self) -> None:
+        """计算三类买卖点"""
+        if not self._bi_zss or len(self._bis) < 3:
             return
         
-        xds = self._xds
-        zss = self._xd_zss
-        
-        def get_xd_range(xd: SimpleXD) -> tuple:
-            """获取线段价格区间（低点、高点）"""
-            start_price = getattr(xd, "start_price", 0.0)
-            end_price = getattr(xd, "end_price", 0.0)
-            low = min(start_price, end_price)
-            high = max(start_price, end_price)
-            return low, high
-        
-        for zs in zss:
-            # 找到属于该中枢时间区间内的线段索引
-            indices_in_zs = []
-            for idx, xd in enumerate(xds):
-                start_time = getattr(xd, "start_time", None)
-                end_time = getattr(xd, "end_time", None)
-                if start_time is None or end_time is None:
+        for zs in self._bi_zss:
+            # 找中枢后的笔
+            for bi in self._bis:
+                if bi.start_time <= zs.end_time:
                     continue
-                if start_time >= zs.start_time and end_time <= zs.end_time:
-                    indices_in_zs.append(idx)
-            
-            if not indices_in_zs:
-                continue
-            
-            last_idx = indices_in_zs[-1]
-            
-            # 从离开中枢后的第一条线段开始寻找三类买卖点
-            i = last_idx + 1
-            while i < len(xds):
-                xd = xds[i]
-                start_price = getattr(xd, "start_price", None)
-                if start_price is None:
-                    i += 1
-                    continue
-                low, high = get_xd_range(xd)
                 
-                # 向上离开中枢，寻找三类买点
-                if xd.type == "up" and zs.zd < start_price < zs.zg and high > zs.zg:
-                    # 找后续的第一条向下线段
-                    j = i + 1
-                    while j < len(xds):
-                        down_xd = xds[j]
-                        if down_xd.type != "down":
-                            j += 1
-                            continue
-                        down_low, _ = get_xd_range(down_xd)
-                        # 不回中枢：最低点仍高于中枢下沿
-                        if down_low > zs.zd:
-                            down_xd.mmds.append(SimpleMMD(
+                # 三买：向上笔回落不进中枢
+                if bi.type == "down" and bi.low > zs.zd:
+                    # 检查前一笔是否突破中枢上沿
+                    bi_idx = self._bis.index(bi)
+                    if bi_idx > 0:
+                        prev_bi = self._bis[bi_idx - 1]
+                        if prev_bi.type == "up" and prev_bi.high > zs.zg:
+                            bi.mmds.append(SimpleMMD(
                                 name="3buy",
                                 zs=zs,
                                 msg="三类买点"
                             ))
-                        break
-                    break
+                            break
                 
-                # 向下离开中枢，寻找三类卖点
-                if xd.type == "down" and zs.zd < start_price < zs.zg and low < zs.zd:
-                    j = i + 1
-                    while j < len(xds):
-                        up_xd = xds[j]
-                        if up_xd.type != "up":
-                            j += 1
-                            continue
-                        _, up_high = get_xd_range(up_xd)
-                        # 不回中枢：最高点仍低于中枢上沿
-                        if up_high < zs.zg:
-                            up_xd.mmds.append(SimpleMMD(
+                # 三卖：向下笔反弹不进中枢
+                if bi.type == "up" and bi.high < zs.zg:
+                    bi_idx = self._bis.index(bi)
+                    if bi_idx > 0:
+                        prev_bi = self._bis[bi_idx - 1]
+                        if prev_bi.type == "down" and prev_bi.low < zs.zd:
+                            bi.mmds.append(SimpleMMD(
                                 name="3sell",
                                 zs=zs,
                                 msg="三类卖点"
                             ))
-                        break
-                    break
-                
-                i += 1
+                            break
     
-    def _calculate_xd_like_class2_and_class3_mmds(self) -> None:
-        """计算类二、类三买卖点（基于已有二类/三类买卖点）"""
-        if not self._xds:
-            return
-        
-        def get_xd_range(xd: SimpleXD) -> tuple:
-            start_price = getattr(xd, "start_price", 0.0)
-            end_price = getattr(xd, "end_price", 0.0)
-            low = min(start_price, end_price)
-            high = max(start_price, end_price)
-            return low, high
-        
-        last_2buy_xd: Optional[SimpleXD] = None
-        last_2sell_xd: Optional[SimpleXD] = None
-        last_3buy_xd: Optional[SimpleXD] = None
-        last_3sell_xd: Optional[SimpleXD] = None
-        
-        for xd in self._xds:
-            low, high = get_xd_range(xd)
-            
-            # 类第二类买点/卖点
-            if last_2buy_xd is not None and xd.type == "up":
-                prev_low, prev_high = get_xd_range(last_2buy_xd)
-                # 与前一二类买点线段形成价格重叠（近似中枢），且当前低点抬高
-                if min(high, prev_high) > max(low, prev_low) and low > prev_low:
-                    xd.mmds.append(SimpleMMD(
-                        name="class2buy",
-                        zs=None,
-                        msg="类第二类买点"
-                    ))
-            if last_2sell_xd is not None and xd.type == "down":
-                prev_low, prev_high = get_xd_range(last_2sell_xd)
-                if min(high, prev_high) > max(low, prev_low) and high < prev_high:
-                    xd.mmds.append(SimpleMMD(
-                        name="class2sell",
-                        zs=None,
-                        msg="类第二类卖点"
-                    ))
-            
-            # 类第三类买点/卖点
-            if last_3buy_xd is not None and xd.type == "up":
-                prev_low, prev_high = get_xd_range(last_3buy_xd)
-                if min(high, prev_high) > max(low, prev_low) and low > prev_low:
-                    xd.mmds.append(SimpleMMD(
-                        name="class3buy",
-                        zs=None,
-                        msg="类第三类买点"
-                    ))
-            if last_3sell_xd is not None and xd.type == "down":
-                prev_low, prev_high = get_xd_range(last_3sell_xd)
-                if min(high, prev_high) > max(low, prev_low) and high < prev_high:
-                    xd.mmds.append(SimpleMMD(
-                        name="class3sell",
-                        zs=None,
-                        msg="类第三类卖点"
-                    ))
-            
-            # 更新最近的二类/三类买卖点线段
-            mmd_names = [getattr(m, "name", "") for m in getattr(xd, "mmds", []) or []]
-            if "2buy" in mmd_names and xd.type == "up":
-                last_2buy_xd = xd
-            if "2sell" in mmd_names and xd.type == "down":
-                last_2sell_xd = xd
-            if "3buy" in mmd_names and xd.type == "up":
-                last_3buy_xd = xd
-            if "3sell" in mmd_names and xd.type == "down":
-                last_3sell_xd = xd
-    
-    def _check_bi_divergence(self, prev_bi: SimpleBi, current_bi: SimpleBi) -> bool:
-        """检测笔背驰
-        
-        规则：
-        - 同方向两笔比较；
-        - 后一笔价格更极端（新高/新低）；
-        - 后一笔力度（MACD 柱子之和）明显减弱。
-        """
-        if prev_bi.type != current_bi.type:
+    def _check_divergence(self, prev: SimpleBi, curr: SimpleBi) -> bool:
+        """检测笔背驰（多维度）"""
+        if prev.type != curr.type:
             return False
         
-        prev_strength = getattr(prev_bi, "strength", 0.0)
-        curr_strength = getattr(current_bi, "strength", 0.0)
+        # 力度比较
+        prev_strength = prev.strength
+        curr_strength = curr.strength
+        
+        if prev_strength <= 0 or curr_strength <= 0:
+            # 力度无效，使用价格幅度
+            prev_strength = prev.price_strength
+            curr_strength = curr.price_strength
+        
+        if prev_strength <= 0:
+            return False
+        
+        # 背驰条件：新高/新低 + 力度减弱
+        strength_ratio = curr_strength / prev_strength
+        
+        if prev.type == "up":
+            # 上笔：创新高但力度减弱
+            return curr.end_price > prev.end_price and strength_ratio < 0.8
+        else:
+            # 下笔：创新低但力度减弱
+            return curr.end_price < prev.end_price and strength_ratio < 0.8
+    
+    def _check_xd_divergence(self, prev: SimpleXD, curr: SimpleXD) -> bool:
+        """检测线段背驰"""
+        if prev.type != curr.type:
+            return False
+        
+        prev_strength = prev.strength
+        curr_strength = curr.strength
+        
         if prev_strength <= 0 or curr_strength <= 0:
             return False
         
-        if prev_bi.type == "up":
-            # 上笔：后笔高点更高但力度更弱
-            return (
-                current_bi.end_price > prev_bi.end_price
-                and curr_strength < prev_strength * 0.8
-            )
-        else:
-            # 下笔：后笔低点更低但力度更弱
-            return (
-                current_bi.end_price < prev_bi.end_price
-                and curr_strength < prev_strength * 0.8
-            )
-    
-    def _check_xd_divergence(self, prev_xd: SimpleXD, current_xd: SimpleXD) -> bool:
-        """检测线段背驰（段背驰）"""
-        if prev_xd.type != current_xd.type:
-            return False
+        strength_ratio = curr_strength / prev_strength
         
-        prev_strength = getattr(prev_xd, "strength", 0.0)
-        curr_strength = getattr(current_xd, "strength", 0.0)
-        if prev_strength <= 0 or curr_strength <= 0:
-            return False
-        
-        if prev_xd.type == "up":
-            return (
-                current_xd.end_price > prev_xd.end_price
-                and curr_strength < prev_strength * 0.8
-            )
+        if prev.type == "up":
+            return curr.end_price > prev.end_price and strength_ratio < 0.8
         else:
-            return (
-                current_xd.end_price < prev_xd.end_price
-                and curr_strength < prev_strength * 0.8
-            )
+            return curr.end_price < prev.end_price and strength_ratio < 0.8
     
-    def _find_related_zs(self, item: Any, zss: List[SimpleZS]) -> Optional[SimpleZS]:
-        """查找与笔/线段相关的中枢"""
-        for zs in zss:
-            # 检查时间重叠
-            if (item.start_time <= zs.end_time and 
-                item.end_time >= zs.start_time):
+    def _find_related_zs(self, bi: SimpleBi, zss: List[SimpleZS]) -> Optional[SimpleZS]:
+        """查找与笔相关的中枢"""
+        for zs in reversed(zss):
+            if bi.start_time <= zs.end_time and bi.end_time >= zs.start_time:
+                return zs
+            if bi.start_time > zs.end_time:
                 return zs
         return None
     
-    def _is_leaving_zs(self, item: Any, zs: SimpleZS) -> bool:
-        """判断是否离开中枢
-        
-        离开中枢的定义：
-        - 下笔/下线段：结束价低于中枢低点 zd
-        - 上笔/上线段：结束价高于中枢高点 zg
-        """
-        if item.type == "down":
-            return item.end_price < zs.zd
+    def _find_related_zs_for_xd(self, xd: SimpleXD, zss: List[SimpleZS]) -> Optional[SimpleZS]:
+        """查找与线段相关的中枢"""
+        for zs in reversed(zss):
+            if xd.start_time <= zs.end_time and xd.end_time >= zs.start_time:
+                return zs
+            if xd.start_time > zs.end_time:
+                return zs
+        return None
+    
+    def _is_leaving_zs(self, bi: SimpleBi, zs: SimpleZS) -> bool:
+        """判断笔是否离开中枢"""
+        if bi.type == "down":
+            return bi.end_price < zs.zd
         else:
-            return item.end_price > zs.zg
+            return bi.end_price > zs.zg
+    
+    def _is_leaving_zs_for_xd(self, xd: SimpleXD, zs: SimpleZS) -> bool:
+        """判断线段是否离开中枢"""
+        if xd.type == "down":
+            return xd.end_price < zs.zd
+        else:
+            return xd.end_price > zs.zg
+    
+    # ========================================
+    # 对外接口
+    # ========================================
     
     def get_bis(self) -> List[SimpleBi]:
         return self._bis
@@ -974,27 +1399,59 @@ class SimpleICL:
     
     def get_zsd_zss(self) -> List[SimpleZS]:
         return self._zsd_zss
+    
+    def get_merged_klines(self) -> List[MergedKline]:
+        """获取合并后的K线（调试用）"""
+        return self._merged_klines
+    
+    def get_fx_list(self) -> List[SimpleFX]:
+        """获取分型列表（调试用）"""
+        return self._fx_list
+    
+    def get_macd_data(self) -> Dict[str, Any]:
+        """获取 MACD 指标数据（用于可视化）
+        
+        返回：
+        - dates: 日期列表
+        - dif: DIF 线
+        - dea: DEA 线 (信号线)
+        - hist: MACD 柱状图 (DIF - DEA) * 2
+        """
+        if self._raw_df is None or len(self._raw_df) == 0:
+            return {"dates": [], "dif": [], "dea": [], "hist": []}
+        
+        df = self._raw_df
+        close = df["close"].astype(float)
+        
+        # 计算 MACD
+        ema_short = close.ewm(span=12, adjust=False).mean()
+        ema_long = close.ewm(span=26, adjust=False).mean()
+        dif = ema_short - ema_long
+        dea = dif.ewm(span=9, adjust=False).mean()
+        hist = (dif - dea) * 2
+        
+        return {
+            "dates": df["date"].tolist(),
+            "dif": dif.tolist(),
+            "dea": dea.tolist(),
+            "hist": hist.tolist(),
+        }
 
 
 # 将 SimpleICL 作为 ICL 的别名，保持接口一致
 ICL = SimpleICL
 
 
+# ============================================================
+# 引擎配置和封装类
+# ============================================================
+
 @dataclass
 class EngineConfig:
-    """缠论引擎配置
-
-    说明：
-    - 与 `config.yaml` 中的 `chanlun` 小节一一对应（或尽量贴近）
-    - 使用 `options` 自由承载缠论引擎所需配置项
-    - engine 只做"透传"：不会修改或二次解释这些配置
-    """
-
-    # 缠论引擎的配置字典，内容直接透传给 ICL(config=...) 参数
-    options: Dict[str, Any] = None
+    """缠论引擎配置"""
     
-    # 算法参数
-    bi_min_kline: int = 5  # 笔的最小 K 线数量
+    options: Dict[str, Any] = None
+    bi_min_kline: int = 4  # 笔的最小 K 线数量（合并后）
     xd_min_bi: int = 3     # 线段的最小笔数量
     zs_min_bi: int = 3     # 中枢的最小笔数量
     
@@ -1005,20 +1462,8 @@ class EngineConfig:
 
 @dataclass
 class KlineInput:
-    """供 engine 使用的最小 K 线输入结构
-
-    说明：
-    - engine 不关心数据来源（交易所 / 本地文件），也不关心更多业务字段
-    - 只要求这几个字段，以便转换为 ICL 需要的 DataFrame:
-      - date:  datetime 或可被 pandas.to_datetime 转换的值
-      - open:  开盘价
-      - high:  最高价
-      - low:   最低价
-      - close: 收盘价
-      - volume: 成交量
-    - 可以在 mapper.py 中将任意数据源统一转换为此结构
-    """
-
+    """供 engine 使用的最小 K 线输入结构"""
+    
     date: Any
     open: float
     high: float
@@ -1028,28 +1473,11 @@ class KlineInput:
 
 
 class ChanlunEngine:
-    """面向上层的缠论引擎封装
-
-    使用方式示意（伪代码）：
-
-    >>> engine_cfg = EngineConfig(options={"kline_type": "kline_chanlun"})
-    >>> engine = ChanlunEngine(engine_cfg)
-    >>> icl = engine.analyze_klines(
-    ...     code="BTC/USDT",
-    ...     frequency="1m",
-    ...     klines=kline_list,  # List[KlineInput] 或兼容结构
-    ... )
-    >>> bis = icl.get_bis()
-    >>> xds = icl.get_xds()
-
-    本类的核心目标：
-    - 保证输入 K 线“原样”进入 ICL，只做必要的结构转换（list -> DataFrame）。
-    - 保证输出为 ICL 原始对象，不做任何 JSON / dict 映射。
-    """
-
+    """面向上层的缠论引擎封装"""
+    
     def __init__(self, config: EngineConfig) -> None:
         self._config = config
-
+    
     def analyze_klines(
         self,
         *,
@@ -1057,27 +1485,10 @@ class ChanlunEngine:
         frequency: str,
         klines: Iterable[KlineInput | Dict[str, Any]],
     ) -> ICL:
-        """对一段完整 K 线序列进行缠论计算
-
-        参数：
-        - code:       品种代码 / 交易对，例如 "BTC/USDT"
-        - frequency:  周期字符串，例如 "1m"、"5m"、"1h" 等
-        - klines:     已按时间顺序排好的一段完整 K 线序列：
-                       - 可以是 KlineInput 实例的可迭代对象
-                       - 也可以是包含 date/open/high/low/close/volume 键的 dict 可迭代对象
-
-        关键约束：
-        - 本方法不会对 K 线序列进行裁剪、过滤、排序等"修改操作"，
-          只做最小必要的结构转换，以满足 ICL.process_klines 的 DataFrame 输入要求。
+        """对一段完整 K 线序列进行缠论计算"""
         
-        返回：
-        - ICL 实例，上层可通过其 get_xxx 方法获取笔、线段、中枢等结构。
-        """
-
-        # 1. 将传入的 klines 原样遍历，构造 DataFrame 所需的行数据
         rows: List[Dict[str, Any]] = []
         for k in klines:
-            # 支持两类输入：KlineInput 或 dict
             if isinstance(k, KlineInput):
                 row = {
                     "date": k.date,
@@ -1088,7 +1499,6 @@ class ChanlunEngine:
                     "volume": k.volume,
                 }
             else:
-                # 约定 dict 至少包含以下字段；若字段名不同，应在 mapper.py 中统一
                 row = {
                     "date": k["date"],
                     "open": k["open"],
@@ -1098,34 +1508,33 @@ class ChanlunEngine:
                     "volume": k["volume"],
                 }
             rows.append(row)
-
-        # 2. 输入验证
+        
         if not rows:
             logger.error(f"[{code}] {frequency} - K 线序列为空")
             raise ValueError("analyze_klines 收到的 K 线序列为空，无法进行缠论计算")
         
         if len(rows) < 50:
-            logger.error(f"[{code}] {frequency} - K 线数量不足: {len(rows)} 根（需要至少 50 根）")
+            logger.error(f"[{code}] {frequency} - K 线数量不足: {len(rows)} 根")
             raise ValueError(f"K 线数量不足，至少需要 50 根，当前 {len(rows)} 根")
         
         logger.info(f"[{code}] {frequency} - 开始缠论分析，共 {len(rows)} 根 K 线")
-
-        # 3. 构造 pandas.DataFrame，并确保日期列为 datetime 类型
+        
         df = pd.DataFrame(rows)
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
-
-        # 若存在无法转换为 datetime 的值，可以选择在此抛错，避免静默使用无效时间
+        
         if df["date"].isna().any():
             logger.error(f"[{code}] {frequency} - K 线数据中存在无效的 date 字段")
-            raise ValueError("K 线数据中存在无法转换为 datetime 的 date 字段，请在 mapper 中清洗")
-
-        # 4. 初始化 ICL 对象
-        icl = ICL(code=code, frequency=frequency, config=self._config.options)
+            raise ValueError("K 线数据中存在无法转换为 datetime 的 date 字段")
         
-        # 5. 将完整的 DataFrame 传入 ICL 进行缠论计算
-        icl = icl.process_klines(df)  # type: ignore[assignment]
+        # 合并配置
+        options = self._config.options.copy() if self._config.options else {}
+        options['bi_min_kline'] = self._config.bi_min_kline
+        options['xd_min_bi'] = self._config.xd_min_bi
+        options['zs_min_bi'] = self._config.zs_min_bi
         
-        # 记录结果统计
+        icl = ICL(code=code, frequency=frequency, config=options)
+        icl = icl.process_klines(df)
+        
         bis_count = len(icl.get_bis())
         xds_count = len(icl.get_xds())
         bi_zss_count = len(icl.get_bi_zss())
@@ -1133,6 +1542,5 @@ class ChanlunEngine:
             f"[{code}] {frequency} - 缠论分析完成: "
             f"笔={bis_count}, 线段={xds_count}, 笔中枢={bi_zss_count}"
         )
-
-        # 6. 原样返回 ICL 实例（原始结构对象），不做 JSON 映射或字段抽取
+        
         return icl
