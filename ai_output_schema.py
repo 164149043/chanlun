@@ -16,9 +16,11 @@ AI_OUTPUT_SCHEMA = {
     "analysis": "string",  # AI 的文字分析内容（可选）
     "structure_judgement": {
         "current_state": "string",
+        "trend": "string",  # up_trend / down_trend / consolidation
         "latest_bi": {
             "direction": "string",
-            "is_done": "boolean"
+            "is_done": "boolean",
+            "strength_vs_prev": "string"  # weakening / strengthening / similar
         },
         "latest_xd": {
             "direction": "string",
@@ -26,9 +28,14 @@ AI_OUTPUT_SCHEMA = {
         },
         "zs": {
             "level": "number",
+            "zg": "number",  # 中枢高点
+            "zd": "number",  # 中枢低点
+            "gg": "number",  # 最高点
+            "dd": "number",  # 最低点
             "range": ["number", "number"],
             "relation": "string"
-        }
+        },
+        "price_position": "string"  # above_zs / below_zs / inside_zs
     },
     "signals": {
         "buy_sell_points": ["string"],
@@ -120,44 +127,51 @@ def get_schema_template() -> str:
     "price": "number",
     "timestamp": "string"
   },
-  "analysis": "string (必须填写：3-5段话的完整分析，包含当前结构、走势分析、关键价位、做多/做空/震荡策略与具体点位）",
+  "analysis": "string (必须填写：3-5段话的完整分析，包含当前结构、走势分析、关键价位ZG/ZD/GG/DD、做多/做空/震荡策略与具体点位）",
   "structure_judgement": {
-    "current_state": "string",
+    "current_state": "string (简述当前结构状态)",
+    "trend": "string (up_trend / down_trend / consolidation)",
     "latest_bi": {
-      "direction": "string",
-      "is_done": "boolean"
+      "direction": "string (up / down)",
+      "is_done": "boolean",
+      "strength_vs_prev": "string (weakening / strengthening / similar，与同向前笔力度对比)"
     },
     "latest_xd": {
-      "direction": "string",
+      "direction": "string (up / down)",
       "is_done": "boolean"
     },
     "zs": {
-      "level": "number",
-      "range": ["number", "number"],
-      "relation": "string"
-    }
+      "level": "number (中枢级别)",
+      "zg": "number (中枢高点)",
+      "zd": "number (中枢低点)",
+      "gg": "number (中枢最高点)",
+      "dd": "number (中枢最低点)",
+      "range": ["number (low)", "number (high)"],
+      "relation": "string (中枢关系：extend / new / ...)"
+    },
+    "price_position": "string (above_zs / below_zs / inside_zs)"
   },
   "signals": {
-    "buy_sell_points": ["string"],
-    "divergences": ["string"]
+    "buy_sell_points": ["string (如 1buy, 2buy, 3buy, 1sell, 2sell, 3sell)"],
+    "divergences": ["string (背驰类型)"]
   },
   "primary_scenario": {
     "direction": "up" | "down",
-    "target_pct": "number (目标涨跌幅，正数)",
-    "stop_pct": "number (止损幅度，正数)",
+    "target_pct": "number (目标涨跌幅%，正数，如 3.0 表示 3%)",
+    "stop_pct": "number (止损幅度%，正数，如 1.5 表示 1.5%)",
     "probability": "number (0~1)",
-    "trigger": "string (触发条件)",
-    "reasoning": "string (逻辑推导)"
+    "trigger": "string (触发条件，使用缠论术语如'突破ZG'、'回踩不破ZD')",
+    "reasoning": "string (基于缠论结构的逻辑推导)"
   },
   "scenarios": [
     {
       "rank": "number",
-      "probability": "number",
-      "direction": "string",
-      "trigger": "string",
-      "target_range": ["number", "number"],
-      "logic": "string"
+      "probability": "number (0~1)",
+      "direction": "string (up / down / range)",
+      "trigger": "string (触发条件)",
+      "target_range": ["number (低)", "number (高)"],
+      "logic": "string (缠论逻辑)"
     }
   ],
-  "risk_notes": ["string"]
+  "risk_notes": ["string (风险提示)"]
 }"""
