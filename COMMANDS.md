@@ -149,7 +149,7 @@ python chanlun_ai.py BTCUSDT 1h --no-ai
 
 ## 📊 辅助工具
 
-### 1. query_stats.py - 查询统计工具
+### 1. query_stats.py - 查询统计工具（增强版）
 
 #### 基础用法
 ```bash
@@ -174,15 +174,37 @@ python query_stats.py [选项]
   ```
 
 ##### `--accuracy`
-- **说明**：只显示准确率统计
+- **说明**：显示准确率统计（增强版 - 全中文）
 - **包含**：
-  - 总体准确率
-  - 按时间间隔统计
-  - 按命中 rank 统计
-  - 按走势方向统计
+  - 总体准确率（命中率、止损率、平均得分、增强得分）
+  - 按结果类型统计（成功命中/部分正确/止损出局/方向错误）
+  - 按预测方向统计（看涨/看跌）
+  - 按交易对统计
+  - 按时间周期统计
+  - **新增**：按趋势类型统计（上升趋势/下降趋势/震荡整理）
+  - **新增**：按价格位置统计（中枢上方/内部/下方）
+  - **新增**：按信号类型统计（一买/二买/三买/一卖/二卖/三卖/底背驰买/顶背驰卖）
 - **示例**：
   ```bash
   python query_stats.py --accuracy
+  ```
+
+##### `--export-csv <文件名>`
+- **说明**：导出评估结果到 CSV 文件（增强版，含完整结构上下文）
+- **新增字段**：
+  - 增强得分
+  - 实际盈亏比
+  - 命中K线位置
+  - 趋势类型（上升趋势/下降趋势/震荡整理）
+  - 价格位置（中枢上方/内部/下方）
+  - 力度对比（力度衰竭/力度增强/力度相近）
+  - 信号类型（一买/二买/三买等）
+  - 有无信号（是/否）
+  - AI概率、触发条件、逻辑
+- **所有值均为中文**
+- **示例**：
+  ```bash
+  python query_stats.py --export-csv output/results.csv
   ```
 
 ##### `--limit <数量>`
@@ -195,7 +217,7 @@ python query_stats.py [选项]
 
 #### 完整示例
 ```bash
-# 显示所有统计（默认）
+# 显示所有统计（默认，全中文）
 python query_stats.py
 
 # 只看最近20条快照
@@ -203,11 +225,145 @@ python query_stats.py --snapshots --limit 20
 
 # 只看准确率统计
 python query_stats.py --accuracy
+
+# 导出完整 CSV（含结构上下文）
+python query_stats.py --export-csv output/results_enhanced.csv
 ```
 
 ---
 
-### 2. evaluate_outcome.py - 结果回填工具
+### 2. stats_enhanced.py - 增强版统计报表
+
+#### 基础用法
+```bash
+python stats_enhanced.py
+```
+
+#### 功能说明
+- **多维度统计**：
+  - 按买卖点类型（1buy/2buy/3buy/1sell/2sell/3sell）
+  - 按趋势类型（上升/下降/震荡）
+  - 按价格位置（中枢上方/内部/下方）
+  - 按力度对比（力度衰竭/增强/相近）
+  - 按有无信号
+  - 交叉组合统计（信号类型 × AI方向）
+- **性能指标**：
+  - 整体胜率、止损率
+  - 平均得分、增强得分
+  - 平均盈亏比
+  - 平均命中时间（K线数）
+
+#### 使用示例
+```bash
+# 查看详细的多维度统计
+python stats_enhanced.py
+```
+
+---
+
+### 3. stats_visualizer.py - 统计图表可视化
+
+#### 基础用法
+```bash
+python stats_visualizer.py
+```
+
+#### 功能说明
+- **生成图表**（保存到 `output/` 目录）：
+  - 胜率分布图（按方向、周期、交易对）
+  - 结果类型分布饼图
+  - 得分分布直方图
+  - 有利/不利变动散点图
+  - 累计胜率趋势图
+  - 滚动平均得分趋势图
+
+#### 使用示例
+```bash
+# 生成所有统计图表
+python stats_visualizer.py
+
+# 查看生成的图表
+ls output/*.png
+```
+
+---
+
+### 4. chanlun_visualizer.py - 缠论结构可视化
+
+#### 基础用法
+```bash
+python chanlun_visualizer.py <交易对> <周期> [选项]
+```
+
+#### 参数说明
+
+##### 必需参数
+- `<交易对>`：如 BTCUSDT, ETHUSDT
+- `<周期>`：如 1h, 4h, 15m
+
+##### 可选参数
+- `--limit <数量>`：K线数量（默认：500）
+- `--no-signals`：不显示买卖点标记
+- `--no-macd`：不显示MACD指标
+
+#### 功能特性
+- K线图（红色下跌，绿色上涨）
+- 笔（Bi）标记与连线
+- 线段（Segment）标记
+- 中枢（ZS）区域高亮
+- 买卖点标注（1买/2买/3买/1卖/2卖/3卖）
+- MACD 指标子图
+- 智能标签避让
+
+#### 使用示例
+```bash
+# 可视化 BTC 1小时图
+python chanlun_visualizer.py BTCUSDT 1h --limit 500
+
+# 可视化 ETH 15分钟图（不显示MACD）
+python chanlun_visualizer.py ETHUSDT 15m --limit 300 --no-macd
+
+# 输出保存在 output/ 目录
+```
+
+---
+
+### 5. multi_level_analyzer.py - 多级别联立分析
+
+#### 基础用法
+```bash
+python multi_level_analyzer.py <交易对> [选项]
+```
+
+#### 参数说明
+
+##### 必需参数
+- `<交易对>`：如 BTCUSDT, ETHUSDT
+
+##### 可选参数
+- `--save`：保存分析报告到 output/
+- `--intervals <周期列表>`：指定分析周期（默认：4h,1h,15m）
+
+#### 功能说明
+- **多周期分析**：同时分析 4H、1H、15M 三个周期
+- **结构对比**：对比不同周期的趋势、中枢、买卖点
+- **综合判断**：基于多级别结构给出综合研判
+- **JSON 导出**：保存完整的多级别分析数据
+
+#### 使用示例
+```bash
+# 分析 BTC 的 4H、1H、15M 三个周期
+python multi_level_analyzer.py BTCUSDT --save
+
+# 自定义周期组合
+python multi_level_analyzer.py ETHUSDT --intervals 1d,4h,1h --save
+
+# 输出保存在 output/multi_level_*.json
+```
+
+---
+
+### 6. evaluate_outcome.py - 结果回填工具
 
 #### 基础用法
 ```bash
@@ -390,6 +546,8 @@ python chanlun_ai.py --help
 
 ## 📋 快速参考
 
+### 核心工具
+
 | 命令 | 说明 |
 |------|------|
 | `python chanlun_ai.py BTCUSDT 1h` | 基础分析 |
@@ -399,5 +557,22 @@ python chanlun_ai.py --help
 | `--structured` | 结构化JSON（保存数据库，含策略概率）|
 | `--table` | 表格格式Markdown |
 | `--no-ai` | 仅显示结构 |
-| `python query_stats.py` | 查看统计 |
+
+### 统计与可视化工具
+
+| 命令 | 说明 |
+|------|------|
+| `python query_stats.py` | 查看统计（全中文） |
+| `python query_stats.py --accuracy` | 增强版准确率统计 |
+| `python query_stats.py --export-csv output/results.csv` | 导出CSV（含结构上下文） |
+| `python stats_enhanced.py` | 详细多维度统计 |
+| `python stats_visualizer.py` | 生成统计图表 |
+| `python chanlun_visualizer.py BTCUSDT 1h` | 可视化缠论结构 |
+| `python multi_level_analyzer.py BTCUSDT` | 多级别联立分析 |
+
+### 评估工具
+
+| 命令 | 说明 |
+|------|------|
 | `python evaluate_outcome.py 60` | 1小时后回填 |
+| `python evaluate_outcome.py 240` | 4小时后回填 |
