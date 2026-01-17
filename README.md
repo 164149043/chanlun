@@ -14,11 +14,13 @@
 ### 核心特性
 
 - 🔄 **实时行情获取**：通过 Binance REST API 获取现货 K 线数据
-- 📊 **缠论结构计算**：自动识别笔、线段、中枢、买卖点、背驰等关键结构（自实现简化版引擎）
+- 📊 **缠论结构计算**：自动识别笔、线段、中枢、买卖点、背驰等关键结构（自实现缠论引擎）
 - 🤖 **AI 智能分析**：支持 DeepSeek、Claude、GPT 等多种 AI 模型进行走势预测
 - 📊 **策略概率分析**：自动计算并显示做多/做空/震荡策略的成功概率
 - 💾 **数据库存储**：SQLite 本地存储，支持历史分析追溯
-- 📈 **准确率统计**：自动回填预测结果，统计 AI 预测准确率
+- 📈 **增强版统计系统**：多维度准确率统计（趋势/位置/力度/信号类型）
+- 📉 **可视化工具**：缠论结构图表 + 统计图表自动生成
+- 🔗 **多级别分析**：支持多周期联立分析（4H/1H/15M）
 - 🛠️ **CLI 工具**：完整的命令行工具，支持多种分析模式
 
 ---
@@ -160,7 +162,7 @@ python chanlun_ai.py BTCUSDT 1h --structured --limit 200 --save
 
 ## 📊 数据库与统计
 
-### 查看分析记录
+### 查看分析记录（增强版 - 全中文）
 
 ```bash
 # 显示所有统计
@@ -169,8 +171,31 @@ python query_stats.py
 # 只显示快照列表
 python query_stats.py --snapshots
 
-# 只显示准确率统计
+# 增强版准确率统计（含趋势/位置/信号类型维度）
 python query_stats.py --accuracy
+
+# 导出完整 CSV（含结构上下文，所有字段中文）
+python query_stats.py --export-csv output/results.csv
+```
+
+### 多维度统计分析
+
+```bash
+# 详细多维度统计报表
+python stats_enhanced.py
+
+# 生成统计图表（保存到 output/）
+python stats_visualizer.py
+```
+
+### 可视化工具
+
+```bash
+# 可视化缠论结构（K线图 + 笔段 + 中枢 + MACD）
+python chanlun_visualizer.py BTCUSDT 1h --limit 500
+
+# 多级别联立分析（4H/1H/15M）
+python multi_level_analyzer.py BTCUSDT --save
 ```
 
 ### 回填预测结果
@@ -202,7 +227,14 @@ python evaluate_outcome.py 1440
 
 4. **查看准确率与平均得分**
    ```bash
+   # 基础统计
    python query_stats.py --accuracy
+   
+   # 详细多维度统计
+   python stats_enhanced.py
+   
+   # 生成统计图表
+   python stats_visualizer.py
    ```
 
 ### 得分（score）计算规则
@@ -227,22 +259,24 @@ python evaluate_outcome.py 1440
   - `score = 0.0`
   - `outcome = "no_direction"`
 
-在 `query_stats.py --accuracy` 中展示的：
+#### 增强得分（enhanced_score）
 
-- **平均得分** = 所有已评估记录的 score 平均值（0~1）
-- 用于衡量“这批预测整体质量如何”，而不仅仅是命中率。
-- 含义就是：
-在所有已评估的预测中，每次预测的平均“质量”，0~1 之间，越接近 1 表示整体越常出现“方向对且到目标”的情况。
-3. 如何解读 0.33 / 1.0 这种数字？
-接近 1.0：大部分预测是“方向对 + 达目标”
-接近 0.5：很多是“方向对但没到目标”，或者“好坏参半”
-接近 0.0：要么经常止损，要么方向经常错，整体表现较弱
-所以你看到终端里类似：
-text
-平均得分: 0.33 / 1.0
-可以理解为：
-系统历史上这批预测的整体质量 偏中下，大部分不是满分命中，也有不少方向错或止损的情况。
+**计算公式**：
+```
+enhanced_score = 命中目标(40%) + 方向正确(20%) + 有利变动比例(20%) + 速度(20%)
+```
 
+**如何解读得分**：
+- 0.8 ~ 1.0：优秀（大部分预测命中目标）
+- 0.5 ~ 0.8：良好（方向对但未完全达标）
+- 0.3 ~ 0.5：一般（方向对的比例较低）
+- 0.0 ~ 0.3：较弱（经常止损或方向错）
+
+---
+
+## 📁 项目结构
+
+```
 chanlun/
 ├── ai/                          # AI 调用模块
 │   ├── llm.py                  # LLM 统一接口
@@ -266,8 +300,12 @@ chanlun/
 │
 ├── 程序入口与工具
 │   ├── chanlun_ai.py          # 主 CLI 工具（获取行情 + 缠论计算 + 调用 AI）
-│   ├── evaluate_outcome.py    # 预测结果评估脚本（按时间间隔评估未来走势）
-│   ├── query_stats.py         # 快照与结果的快速查询工具
+│   ├── evaluate_outcome.py    # 预测结果评估脚本（增强版，含结构上下文提取）
+│   ├── query_stats.py         # 快照与结果的快速查询工具（增强版，全中文）
+│   ├── stats_enhanced.py      # 增强版统计报表（多维度统计）
+│   ├── stats_visualizer.py    # 统计图表可视化工具
+│   ├── chanlun_visualizer.py  # 缠论结构可视化工具
+│   ├── multi_level_analyzer.py # 多级别联立分析工具
 │   └── stats_report.py        # 研究报告生成器（AI × 缠论结构统计）
 │
 ├── 配置文件
@@ -312,8 +350,9 @@ chanlun/
       python evaluate_outcome.py 240
       ```
 
-- **`query_stats.py`**：快照/结果快速查看
-  - **作用**：查看最近的分析快照、结果回填记录和简单的准确率统计
+- **`query_stats.py`**：快照/结果快速查看（增强版 - 全中文）
+  - **作用**：查看最近的分析快照、结果回填记录和增强版准确率统计（含趋势/位置/信号类型维度）
+  - **新增**：导出 CSV 文件（含完整结构上下文，所有字段中文）
   - **示例**：
     ```bash
     # 最近快照
@@ -322,8 +361,65 @@ chanlun/
     # 回填结果
     python query_stats.py --outcomes
 
-    # 准确率汇总
+    # 增强版准确率汇总
     python query_stats.py --accuracy
+    
+    # 导出 CSV（含结构上下文）
+    python query_stats.py --export-csv output/results.csv
+    ```
+
+- **`stats_enhanced.py`**：增强版统计报表
+  - **作用**：提供详细的多维度统计分析
+  - **统计维度**：
+    - 按买卖点类型（1buy/2buy/3buy/1sell/2sell/3sell）
+    - 按趋势类型（上升/下降/震荡）
+    - 按价格位置（中枢上方/内部/下方）
+    - 按力度对比（衰竭/增强/相近）
+    - 按有无信号
+    - 交叉组合统计（信号类型 × AI方向）
+  - **示例**：
+    ```bash
+    python stats_enhanced.py
+    ```
+
+- **`stats_visualizer.py`**：统计图表可视化
+  - **作用**：生成统计图表（保存到 output/ 目录）
+  - **生成图表**：
+    - 胜率分布图（按方向、周期、交易对）
+    - 结果类型分布饼图
+    - 得分分布直方图
+    - 有利/不利变动散点图
+    - 累计胜率趋势图
+    - 滚动平均得分趋势图
+  - **示例**：
+    ```bash
+    python stats_visualizer.py
+    ```
+
+- **`chanlun_visualizer.py`**：缠论结构可视化
+  - **作用**：生成缠论结构图表（K线 + 笔段 + 中枢 + 买卖点 + MACD）
+  - **特性**：
+    - K线图（红色下跌，绿色上涨）
+    - 笔（Bi）标记与连线
+    - 线段（Segment）标记
+    - 中枢（ZS）区域高亮
+    - 买卖点标注
+    - MACD 指标子图
+  - **示例**：
+    ```bash
+    python chanlun_visualizer.py BTCUSDT 1h --limit 500
+    ```
+
+- **`multi_level_analyzer.py`**：多级别联立分析
+  - **作用**：同时分析多个周期（4H/1H/15M），提供综合研判
+  - **功能**：
+    - 多周期结构对比
+    - 趋势一致性判断
+    - 关键价位汇总
+    - JSON 导出
+  - **示例**：
+    ```bash
+    python multi_level_analyzer.py BTCUSDT --save
     ```
 
 - **`stats_report.py`**：研究报告生成器
