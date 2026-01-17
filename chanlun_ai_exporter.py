@@ -69,6 +69,9 @@ class ChanlunAIExporter:
             "allowed_strategy": ["trend_follow", "range_trade"],
         }
         
+        # 8. structure_summary - 结构摘要（新增）
+        structure_summary = self._build_structure_summary(icl=icl, latest_price=latest_price)
+        
         return {
             "meta": meta,
             "market": market,
@@ -77,6 +80,7 @@ class ChanlunAIExporter:
             "center": center,
             "signal": signal,
             "context": context,
+            "structure_summary": structure_summary,
         }
     
     def export_summary(self, icl: Any, latest_price: float) -> Dict[str, Any]:
@@ -204,6 +208,14 @@ class ChanlunAIExporter:
             divergence_types = [getattr(bc, 'type', '') for bc in bcs if getattr(bc, 'bc', False)]
             bi_dict["divergence"] = divergence_types[0] if divergence_types else None
             
+            # 力度值（新增）
+            if hasattr(bi, 'strength'):
+                bi_dict["strength"] = round(float(getattr(bi, 'strength', 0)), 2)
+            if hasattr(bi, 'macd_strength'):
+                bi_dict["macd_strength"] = round(float(getattr(bi, 'macd_strength', 0)), 2)
+            if hasattr(bi, 'price_strength'):
+                bi_dict["price_strength"] = round(float(getattr(bi, 'price_strength', 0)), 2)
+            
             result.append(bi_dict)
         
         return result
@@ -267,6 +279,18 @@ class ChanlunAIExporter:
                 if hasattr(zs, 'end_time'):
                     end_time = getattr(zs, 'end_time')
                     zs_dict["end_time"] = end_time.isoformat() if hasattr(end_time, 'isoformat') else str(end_time)
+                
+                # 中枢核心价格区间（新增 ZG/ZD/GG/DD）
+                if hasattr(zs, 'zg'):
+                    zs_dict["zg"] = float(getattr(zs, 'zg'))  # 中枢高点
+                if hasattr(zs, 'zd'):
+                    zs_dict["zd"] = float(getattr(zs, 'zd'))  # 中枢低点
+                if hasattr(zs, 'gg'):
+                    zs_dict["gg"] = float(getattr(zs, 'gg'))  # 中枢最高点
+                if hasattr(zs, 'dd'):
+                    zs_dict["dd"] = float(getattr(zs, 'dd'))  # 中枢最低点
+                
+                # 兼容旧字段
                 if hasattr(zs, 'high'):
                     zs_dict["high"] = float(getattr(zs, 'high'))
                 if hasattr(zs, 'low'):
@@ -275,6 +299,8 @@ class ChanlunAIExporter:
                     zs_dict["level"] = int(getattr(zs, 'level'))
                 if hasattr(zs, 'relation'):
                     zs_dict["relation"] = str(getattr(zs, 'relation'))
+                if hasattr(zs, 'bi_count'):
+                    zs_dict["bi_count"] = int(getattr(zs, 'bi_count'))  # 中枢内笔的数量
                 
                 result.append(zs_dict)
         
@@ -294,6 +320,17 @@ class ChanlunAIExporter:
                 if hasattr(zs, 'end_time'):
                     end_time = getattr(zs, 'end_time')
                     zs_dict["end_time"] = end_time.isoformat() if hasattr(end_time, 'isoformat') else str(end_time)
+                
+                # 中枢核心价格区间
+                if hasattr(zs, 'zg'):
+                    zs_dict["zg"] = float(getattr(zs, 'zg'))
+                if hasattr(zs, 'zd'):
+                    zs_dict["zd"] = float(getattr(zs, 'zd'))
+                if hasattr(zs, 'gg'):
+                    zs_dict["gg"] = float(getattr(zs, 'gg'))
+                if hasattr(zs, 'dd'):
+                    zs_dict["dd"] = float(getattr(zs, 'dd'))
+                
                 if hasattr(zs, 'high'):
                     zs_dict["high"] = float(getattr(zs, 'high'))
                 if hasattr(zs, 'low'):
@@ -362,3 +399,111 @@ class ChanlunAIExporter:
             "buy_sell_points": sorted(set(buy_sell_points)),
             "divergences": sorted(set(divergences)),
         }
+    
+    def _build_structure_summary(self, icl: Any, latest_price: float) -> Dict[str, Any]:
+        """构造结构摘要（新增）
+        
+        提供给 AI 的高级结构解读，包括：
+        - 趋势判断
+        - 价格相对中枢位置
+        - 最新笔/线段状态
+        - 力度对比
+        """
+        
+        bis = icl.get_bis() if hasattr(icl, 'get_bis') else []
+        xds = icl.get_xds() if hasattr(icl, 'get_xds') else []
+        bi_zss = icl.get_bi_zss() if hasattr(icl, 'get_bi_zss') else []
+        
+        summary = {
+            "trend": "unknown",
+            "price_position": "unknown",
+            "latest_bi_direction": "unknown",
+            "latest_bi_strength": 0,
+            "prev_bi_strength": 0,
+            "strength_comparison": "unknown",
+            "key_levels": {},
+        }
+        
+        # 1. 趋势判断（基于最近笔的高低点）
+        if len(bis) >= 5:
+            recent_bis = bis[-5:]
+            highs = [bi.high for bi in recent_bis]
+            lows = [bi.low for bi in recent_bis]
+            
+            highs_rising = all(highs[i] <= highs[i+1] for i in range(len(highs)-1))
+            lows_rising = all(lows[i] <= lows[i+1] for i in range(len(lows)-1))
+            highs_falling = all(highs[i] >= highs[i+1] for i in range(len(highs)-1))
+            lows_falling = all(lows[i] >= lows[i+1] for i in range(len(lows)-1))
+            
+            if highs_rising and lows_rising:
+                summary["trend"] = "up_trend"
+            elif highs_falling and lows_falling:
+                summary["trend"] = "down_trend"
+            else:
+                summary["trend"] = "consolidation"
+        
+        # 2. 价格相对中枢位置
+        if bi_zss:
+            latest_zs = bi_zss[-1]
+            zg = getattr(latest_zs, 'zg', 0)
+            zd = getattr(latest_zs, 'zd', 0)
+            
+            if latest_price > zg:
+                summary["price_position"] = "above_zs"
+            elif latest_price < zd:
+                summary["price_position"] = "below_zs"
+            else:
+                summary["price_position"] = "inside_zs"
+            
+            # 关键价位
+            summary["key_levels"] = {
+                "zg": zg,
+                "zd": zd,
+                "gg": getattr(latest_zs, 'gg', zg),
+                "dd": getattr(latest_zs, 'dd', zd),
+            }
+        
+        # 3. 最新笔状态和力度
+        if bis:
+            latest_bi = bis[-1]
+            summary["latest_bi_direction"] = getattr(latest_bi, 'type', 'unknown')
+            summary["latest_bi_strength"] = round(getattr(latest_bi, 'strength', 0), 2)
+            
+            if len(bis) >= 3:
+                # 比较同向前笔力度
+                prev_same_dir_bi = None
+                for bi in reversed(bis[:-1]):
+                    if bi.type == latest_bi.type:
+                        prev_same_dir_bi = bi
+                        break
+                
+                if prev_same_dir_bi:
+                    summary["prev_bi_strength"] = round(getattr(prev_same_dir_bi, 'strength', 0), 2)
+                    
+                    if summary["latest_bi_strength"] > 0 and summary["prev_bi_strength"] > 0:
+                        ratio = summary["latest_bi_strength"] / summary["prev_bi_strength"]
+                        if ratio < 0.8:
+                            summary["strength_comparison"] = "weakening"  # 力度减弱
+                        elif ratio > 1.2:
+                            summary["strength_comparison"] = "strengthening"  # 力度增强
+                        else:
+                            summary["strength_comparison"] = "similar"  # 力度相当
+        
+        # 4. 趋势描述（中文）
+        trend_desc = {
+            "up_trend": "上升趋势（高点和低点依次抬高）",
+            "down_trend": "下降趋势（高点和低点依次降低）",
+            "consolidation": "震荡盘整（无明显趋势）",
+            "unknown": "未知",
+        }
+        summary["trend_description"] = trend_desc.get(summary["trend"], "未知")
+        
+        position_desc = {
+            "above_zs": "价格在中枢上方（多头占优）",
+            "below_zs": "价格在中枢下方（空头占优）",
+            "inside_zs": "价格在中枢内部（多空博弈）",
+            "unknown": "无中枢参考",
+        }
+        summary["position_description"] = position_desc.get(summary["price_position"], "未知")
+        
+        return summary
