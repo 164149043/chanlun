@@ -19,3 +19,7 @@ PyYAML>=6.0.1
 
 # 环境变量管理（用于读取 .env 文件）
 python-dotenv>=1.0.0
+
+# 可视化（用于绘制缠论结构图）
+matplotlib>=3.8.0
+mplfinance>=0.12.10b0
