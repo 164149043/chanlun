@@ -102,3 +102,34 @@ class ICL:
         if not hasattr(self, '_icl_result'):
             return []
         return self._icl_result.get_zsd_zss()
+    
+    def get_merged_klines(self) -> List[Any]:
+        """获取合并后的K线列表（调试用）"""
+        if not hasattr(self, '_icl_result'):
+            return []
+        if hasattr(self._icl_result, 'get_merged_klines'):
+            return self._icl_result.get_merged_klines()
+        return []
+    
+    def get_fx_list(self) -> List[Any]:
+        """获取分型列表（调试用）"""
+        if not hasattr(self, '_icl_result'):
+            return []
+        if hasattr(self._icl_result, 'get_fx_list'):
+            return self._icl_result.get_fx_list()
+        return []
+    
+    def get_macd_data(self) -> Dict[str, Any]:
+        """获取 MACD 指标数据（用于可视化）
+        
+        返回字典包含：
+        - dates: 日期列表
+        - dif: DIF 线
+        - dea: DEA 线 (信号线)
+        - hist: MACD 柱状图
+        """
+        if not hasattr(self, '_icl_result'):
+            return {"dates": [], "dif": [], "dea": [], "hist": []}
+        if hasattr(self._icl_result, 'get_macd_data'):
+            return self._icl_result.get_macd_data()
+        return {"dates": [], "dif": [], "dea": [], "hist": []}
