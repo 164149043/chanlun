@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """缠论 AI 分析命令行工具
 
 用法:
@@ -16,10 +17,20 @@
     python chanlun_ai.py BTCUSDT 1h --table
     python chanlun_ai.py BTCUSDT 1h --stats      # 分析并显示准确率统计
 """
-import argparse
-import json
 import os
 import sys
+
+# Windows 终端编码修复
+if sys.platform == 'win32':
+    os.system('chcp 65001 >nul 2>&1')
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except AttributeError:
+        pass  # Python < 3.7
+
+import argparse
+import json
 from datetime import datetime
 from pathlib import Path
 import sqlite3
@@ -591,6 +602,19 @@ def main():
                     elif not stats_summary:
                         print("   ⚠️  统计数据为空，跳过校验")
                 
+                # ⭐ 计算信号质量评分（保存到数据库前）
+                try:
+                    from signal_quality import calculate_signal_quality
+                    quality = calculate_signal_quality(ai_json, validated_output)
+                    # 将质量评分添加到 validated_output 中（用于数据库存储）
+                    validated_output["signal_quality"] = {
+                        "total_score": quality["total_score"],
+                        "grade": quality["grade"],
+                        "action": quality["action"],
+                    }
+                except Exception as qe:
+                    print(f"   ⚠️  信号质量评分计算失败: {qe}")
+                
                 # ⭐ 保存分析快照到数据库（AI 输出验证通过后）
                 try:
                     snapshot_id = save_snapshot(
@@ -598,7 +622,7 @@ def main():
                         interval=interval,
                         price=latest_price,
                         chanlun_json=ai_json,  # 完整的缠论结构 JSON
-                        ai_json=validated_output,  # AI 输出的结构化 JSON
+                        ai_json=validated_output,  # AI 输出的结构化 JSON（含信号质量）
                     )
                     print(f"   💾 已保存分析快照（ID: {snapshot_id}）")
                 except Exception as db_err:
@@ -653,6 +677,19 @@ def main():
                 print(f"   止损幅度：{primary.get('stop_pct', 0):.1f}%")
                 print(f"   概率：{primary.get('probability', 0) * 100:.0f}%")
                 print(f"   触发条件：{primary.get('trigger', '')}")
+                
+                # 2.5 信号质量评分（显示报告）
+                if "signal_quality" in validated_output:
+                    try:
+                        from signal_quality import calculate_signal_quality, format_quality_report
+                        # 重新计算完整质量数据以获取详细报告
+                        quality = calculate_signal_quality(ai_json, validated_output)
+                        quality_report = format_quality_report(quality)
+                        print(quality_report)
+                    except Exception as qe:
+                        # 如果详细报告失败，仍然显示简化版
+                        sq = validated_output["signal_quality"]
+                        print(f"\n  信号质量评分: {sq['total_score']:.1f}/100 (评级: {sq['grade']})")
                 
                 # 3. 显示完整 JSON（供调试或程序化使用）
                 print("\n📊 完整结构化数据：")
