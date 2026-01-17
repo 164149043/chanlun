@@ -57,10 +57,10 @@ def fetch_pending_records(conn) -> List[tuple]:
     """获取待评估的记录（evaluated = 0 且有 ai_json）
     
     返回：
-    - List[tuple]: (id, symbol, interval, timestamp, ai_json_str)
+    - List[tuple]: (id, symbol, interval, timestamp, ai_json_str, chanlun_json_str)
     """
     sql = """
-    SELECT id, symbol, interval, timestamp, ai_json
+    SELECT id, symbol, interval, timestamp, ai_json, chanlun_json
     FROM analysis_snapshot
     WHERE evaluated = 0 AND ai_json IS NOT NULL
     """
@@ -89,23 +89,122 @@ def mark_as_evaluated(conn, record_id: int, outcome_json: dict):
 # 核心评估逻辑
 # ============================================
 
-def evaluate_outcome(ai_json: dict, future_klines: List[Dict[str, Any]], entry_price: float) -> dict:
-    """核心评估逻辑
+def extract_structure_context(ai_json: dict, chanlun_json: dict = None) -> dict:
+    """从缠论结构 JSON 中提取上下文（用于细分统计）
+    
+    参数：
+    - ai_json: AI 输出的结构化 JSON
+    - chanlun_json: exporter 导出的完整缠论结构 JSON（优先使用）
+    
+    返回：
+    - dict: 结构上下文信息
+    """
+    context = {
+        "buy_sell_points": [],
+        "divergences": [],
+        "trend": "unknown",
+        "price_position": "unknown",
+        "strength_comparison": "unknown",
+        "zg": 0,
+        "zd": 0,
+        "has_signal": False,
+    }
+    
+    # 优先从 chanlun_json（exporter 导出的完整结构）提取
+    source = chanlun_json if chanlun_json else ai_json
+    
+    # 从 signal 字段提取买卖点和背驰
+    signal = source.get("signal", {})
+    context["buy_sell_points"] = signal.get("buy_sell_points", [])
+    context["divergences"] = signal.get("divergences", [])
+    context["has_signal"] = bool(context["buy_sell_points"] or context["divergences"])
+    
+    # 从 structure_summary 提取趋势和位置（新版导出）
+    summary = source.get("structure_summary", {})
+    if summary:
+        context["trend"] = summary.get("trend", "unknown")
+        context["price_position"] = summary.get("price_position", "unknown")
+        context["strength_comparison"] = summary.get("strength_comparison", "unknown")
+        key_levels = summary.get("key_levels", {})
+        context["zg"] = key_levels.get("zg", 0)
+        context["zd"] = key_levels.get("zd", 0)
+    
+    # 兼容旧版：从 structure_judgement 提取（AI 输出或旧版 chanlun_json）
+    if not summary:
+        sj = ai_json.get("structure_judgement", {}) if ai_json else {}
+        if sj:
+            zs = sj.get("zs", {})
+            zs_range = zs.get("range") or []
+            if isinstance(zs_range, list) and len(zs_range) == 2:
+                context["zd"] = context["zd"] or float(zs_range[0])
+                context["zg"] = context["zg"] or float(zs_range[1])
+    
+    # 分类买卖点类型
+    context["signal_type"] = _classify_signal(context["buy_sell_points"], context["divergences"])
+    
+    return context
+
+
+def _classify_signal(buy_sell_points: list, divergences: list) -> str:
+    """分类信号类型
+    
+    返回：
+    - "1buy" / "2buy" / "3buy" / "1sell" / "2sell" / "3sell" / 
+    - "bc_buy" / "bc_sell" / "mixed" / "none"
+    """
+    if not buy_sell_points and not divergences:
+        return "none"
+    
+    # 优先级：明确的买卖点 > 背驰信号
+    for signal in buy_sell_points:
+        signal_lower = signal.lower()
+        if "1buy" in signal_lower or "一买" in signal:
+            return "1buy"
+        elif "2buy" in signal_lower or "二买" in signal:
+            return "2buy"
+        elif "3buy" in signal_lower or "三买" in signal:
+            return "3buy"
+        elif "1sell" in signal_lower or "一卖" in signal:
+            return "1sell"
+        elif "2sell" in signal_lower or "二卖" in signal:
+            return "2sell"
+        elif "3sell" in signal_lower or "三卖" in signal:
+            return "3sell"
+    
+    # 背驰信号
+    for bc in divergences:
+        bc_lower = bc.lower()
+        if "bi" in bc_lower or "笔" in bc:
+            if "bottom" in bc_lower or "底" in bc:
+                return "bc_buy"
+            elif "top" in bc_lower or "顶" in bc:
+                return "bc_sell"
+    
+    if buy_sell_points or divergences:
+        return "mixed"
+    
+    return "none"
+
+
+def evaluate_outcome(ai_json: dict, future_klines: List[Dict[str, Any]], entry_price: float, chanlun_json: dict = None) -> dict:
+    """核心评估逻辑（增强版）
     
     参数：
     - ai_json: AI 输出的结构化 JSON
     - future_klines: 未来 K 线列表（至少 10 根）
     - entry_price: 入场价格（分析时的价格）
+    - chanlun_json: exporter 导出的完整缠论结构 JSON（可选，用于提取结构上下文）
     
     返回：
-    - dict: 评估结果
+    - dict: 评估结果（包含结构上下文）
       {
         "direction": "up" | "down",
         "hit_target": bool,
         "hit_stop": bool,
         "max_favorable_move": float,  # 最大有利变动（%）
         "max_adverse_move": float,    # 最大不利变动（%）
-        "evaluated_bars": int         # 实际评估的 K 线数量
+        "evaluated_bars": int,        # 实际评估的 K 线数量
+        "structure_context": {...}    # 缠论结构上下文
       }
     """
     # 1. 提取 primary_scenario
@@ -188,6 +287,49 @@ def evaluate_outcome(ai_json: dict, future_klines: List[Dict[str, Any]], entry_p
         score = 0.0
         outcome = "no_direction"
     
+    # 提取结构上下文（优先从 chanlun_json 提取）
+    structure_context = extract_structure_context(ai_json, chanlun_json)
+    
+    # 计算命中时间（第几根 K 线命中目标/止损）
+    hit_target_bar = None
+    hit_stop_bar = None
+    
+    for i, k in enumerate(future_klines):
+        if direction == "up":
+            k_up_move = (k["high"] - entry_price) / entry_price * 100
+            k_down_move = (k["low"] - entry_price) / entry_price * 100
+            if hit_target_bar is None and k_up_move >= target_pct:
+                hit_target_bar = i + 1
+            if hit_stop_bar is None and k_down_move <= -stop_pct:
+                hit_stop_bar = i + 1
+        elif direction == "down":
+            k_up_move = (k["high"] - entry_price) / entry_price * 100
+            k_down_move = (k["low"] - entry_price) / entry_price * 100
+            if hit_target_bar is None and k_down_move <= -target_pct:
+                hit_target_bar = i + 1
+            if hit_stop_bar is None and k_up_move >= stop_pct:
+                hit_stop_bar = i + 1
+    
+    # 计算盈亏比（实际）
+    actual_rr = 0
+    if max_adverse_move != 0:
+        actual_rr = round(abs(max_favorable_move / max_adverse_move), 2)
+    
+    # 计算预期盈亏比
+    expected_rr = round(target_pct / stop_pct, 2) if stop_pct > 0 else 0
+    
+    # 改进评分算法
+    enhanced_score = _calculate_enhanced_score(
+        hit_target=hit_target,
+        hit_stop=hit_stop,
+        direction=direction,
+        final_move=final_move,
+        max_favorable_move=max_favorable_move,
+        target_pct=target_pct,
+        hit_target_bar=hit_target_bar,
+        total_bars=len(future_klines)
+    )
+    
     return {
         "direction": direction,
         "target_pct": target_pct,
@@ -203,8 +345,67 @@ def evaluate_outcome(ai_json: dict, future_klines: List[Dict[str, Any]], entry_p
         "max_high": max_high,
         "min_low": min_low,
         "score": score,
+        "enhanced_score": enhanced_score,
         "outcome": outcome,
+        # 新增字段
+        "hit_target_bar": hit_target_bar,
+        "hit_stop_bar": hit_stop_bar,
+        "actual_rr": actual_rr,
+        "expected_rr": expected_rr,
+        "structure_context": structure_context,
     }
+
+
+def _calculate_enhanced_score(
+    hit_target: bool,
+    hit_stop: bool,
+    direction: str,
+    final_move: float,
+    max_favorable_move: float,
+    target_pct: float,
+    hit_target_bar: int,
+    total_bars: int
+) -> float:
+    """计算增强评分
+    
+    评分维度：
+    1. 命中目标 (0.4)
+    2. 方向正确 (0.2)
+    3. 最大有利变动占目标比例 (0.2)
+    4. 命中速度 (0.2)
+    
+    返回：0.0 ~ 1.0
+    """
+    score = 0.0
+    
+    # 1. 命中目标（权重 0.4）
+    if hit_target and not hit_stop:
+        score += 0.4
+    elif hit_target and hit_stop:
+        # 先命中目标再止损，给一半分
+        score += 0.2
+    
+    # 2. 方向正确（权重 0.2）
+    if direction == "up" and final_move > 0:
+        score += 0.2
+    elif direction == "down" and final_move < 0:
+        score += 0.2
+    elif direction in ["up", "down"]:
+        # 方向错误
+        score += 0.0
+    
+    # 3. 最大有利变动占目标比例（权重 0.2）
+    if target_pct > 0:
+        ratio = min(max_favorable_move / target_pct, 1.0)
+        score += 0.2 * ratio
+    
+    # 4. 命中速度（权重 0.2）
+    if hit_target_bar is not None and total_bars > 0:
+        # 越快命中得分越高
+        speed_score = 1.0 - (hit_target_bar / total_bars)
+        score += 0.2 * speed_score
+    
+    return round(score, 3)
 
 
 # ============================================
@@ -233,14 +434,15 @@ def main():
     failed_count = 0
     
     for rec in records:
-        record_id, symbol, interval, timestamp_str, ai_json_str = rec
+        record_id, symbol, interval, timestamp_str, ai_json_str, chanlun_json_str = rec
         
         print(f"评估快照 #{record_id}: {symbol} @ {interval}")
         print(f"  分析时间: {timestamp_str}")
         
         try:
-            # 1. 解析 AI JSON
+            # 1. 解析 AI JSON 和 缠论结构 JSON
             ai_json = json.loads(ai_json_str)
+            chanlun_json = json.loads(chanlun_json_str) if chanlun_json_str else None
             
             # 2. 解析时间戳（ISO 格式）
             analysis_time = datetime.fromisoformat(timestamp_str)
@@ -279,8 +481,8 @@ def main():
             )
             entry_price = cursor.fetchone()[0]
             
-            # 8. 评估结果
-            outcome = evaluate_outcome(ai_json, klines, entry_price)
+            # 8. 评估结果（传入 chanlun_json 以提取结构上下文）
+            outcome = evaluate_outcome(ai_json, klines, entry_price, chanlun_json)
             
             if "error" in outcome:
                 print(f"  ✗ 评估失败: {outcome['error']}")
