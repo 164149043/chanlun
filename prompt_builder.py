@@ -5,11 +5,43 @@
 - 使用专门针对缠论分析的提示词模板
 - 强制 AI 输出结构化 JSON，不是自由文本
 - 支持 A2.5 统计提示注入
+- 包含缠论术语解释和结构摘要
 """
 import json
 from typing import Dict, Any
 from ai_output_schema import get_schema_template
 from stat_hint import get_stat_hint
+
+
+def _format_strength_comparison(comparison: str) -> str:
+    """格式化力度对比描述"""
+    mapping = {
+        "weakening": "力度减弱（可能背驰）",
+        "strengthening": "力度增强（趋势延续）",
+        "similar": "力度相当",
+        "unknown": "无法判断",
+    }
+    return mapping.get(comparison, "未知")
+
+
+# 缠论术语解释模板
+TERMINOLOGY_BLOCK = """
+【缠论核心术语解释】
+1. **笔（Bi）**：由相邻的顶分型和底分型连接形成，是最小的趋势单位
+2. **线段（XD）**：由至少3笔组成，当特征序列出现反向分型时线段结束
+3. **中枢（ZhongShu/ZS）**：至少3笔重叠的价格区间
+   - ZG：中枢高点（三笔重叠区间的上边界）
+   - ZD：中枢低点（三笔重叠区间的下边界）
+   - GG：中枢内所有笔的最高点
+   - DD：中枢内所有笔的最低点
+4. **买卖点**：
+   - 1buy（一类买点）：下跌趋势背驰后的低点
+   - 2buy（二类买点）：一买后回调不破低点
+   - 3buy（三类买点）：中枢震荡后向上突破回踩不进中枢
+   - 1sell/2sell/3sell：对应的卖点
+5. **背驰（BC）**：走势延续但力度减弱，预示趋势可能反转
+6. **力度（Strength）**：衡量笔的强弱，力度减弱（weakening）提示背驰可能
+"""
 
 
 def build_structured_prompt(ai_json: Dict[str, Any], stats_context: str = "") -> str:
@@ -32,17 +64,16 @@ def build_structured_prompt(ai_json: Dict[str, Any], stats_context: str = "") ->
     interval = meta.get("interval", "Unknown")
     latest_price = float(market.get("latest_price", 0.0))
     
-    # 计算当前结构是否在中枢内（用于 A2.5 统计提示）
-    in_zs = False
-    sj = ai_json.get("structure_judgement", {})
-    zs = sj.get("zs", {})
-    zs_range = zs.get("range") or []
-    if isinstance(zs_range, list) and len(zs_range) == 2:
-        try:
-            low, high = float(zs_range[0]), float(zs_range[1])
-            in_zs = low <= latest_price <= high
-        except Exception:
-            in_zs = False
+    # 获取结构摘要（新增）
+    structure_summary = ai_json.get("structure_summary", {})
+    trend_desc = structure_summary.get("trend_description", "未知")
+    position_desc = structure_summary.get("position_description", "未知")
+    key_levels = structure_summary.get("key_levels", {})
+    strength_comparison = structure_summary.get("strength_comparison", "unknown")
+    price_position = structure_summary.get("price_position", "unknown")
+    
+    # 计算当前结构是否在中枢内
+    in_zs = price_position == "inside_zs"
     
     # === A2.5 统计提示 ===
     stat = get_stat_hint(symbol=symbol, interval=interval, in_zs=in_zs)
@@ -59,6 +90,18 @@ def build_structured_prompt(ai_json: Dict[str, Any], stats_context: str = "") ->
 结论：{stat["hint"]}
 """
     
+    # === 当前结构摘要（新增） ===
+    summary_block = f"""
+【当前结构摘要】
+- 交易对：{symbol}，周期：{interval}
+- 当前价格：{latest_price:.2f}
+- 趋势判断：{trend_desc}
+- 价格位置：{position_desc}
+- 力度对比：{_format_strength_comparison(strength_comparison)}
+- 中枢区间：ZG={key_levels.get('zg', 0):.0f}, ZD={key_levels.get('zd', 0):.0f}
+- 中枢波动：GG={key_levels.get('gg', 0):.0f}, DD={key_levels.get('dd', 0):.0f}
+"""
+    
     # === 系统约束（强约束） ===
     system_block = """
 【系统约束】
@@ -72,6 +115,12 @@ def build_structured_prompt(ai_json: Dict[str, Any], stats_context: str = "") ->
 - 禁止引入外部行情、消息、情绪
 - 禁止超出提供数据进行推断
 - 禁止输出 Schema 之外的字段
+
+【分析重点】
+1. 基于中枢位置判断多空优势
+2. 基于力度对比判断背驰可能
+3. 基于买卖点信号确定操作方向
+4. 给出具体的价格点位（入场/止损/目标）
 """
     
     # === 历史表现上下文（可选） ===
@@ -103,15 +152,15 @@ def build_structured_prompt(ai_json: Dict[str, Any], stats_context: str = "") ->
    - stop_pct: 止损幅度（正数，如 2.0 表示 2%）
      * 建议为 target_pct 的 40-60%
    - probability: 0~1 之间
-   - trigger: 触发条件
-   - reasoning: 逻辑推导
+   - trigger: 触发条件（使用缠论术语，如"突破中枢ZG"、"回踩不破ZD"）
+   - reasoning: 逻辑推导（说明基于哪些缠论结构得出结论）
 8. analysis 字段（必须填写）：
    - 3-5 段话的完整文字分析
    - 给交易者看的市场解读和操作策略
    - 必须包含以下内容：
-     a) 当前结构判断（笔、线段、中枢状态）
+     a) 当前结构判断（笔、线段、中枢状态，力度对比）
      b) 可能走势分析（2-3种场景）
-     c) 关键价位（支撑位、阻力位、中枢区间）
+     c) 关键价位（支撑位、阻力位、中枢区间 ZG/ZD/GG/DD）
      d) **做多策略（概率 XX%）**：入场点位、目标位、止损位（如果适合做多）
      e) **做空策略（概率 XX%）**：入场点位、目标位、止损位（如果适合做空）
      f) **震荡策略（概率 XX%）**：价格区间、高抛低吸点位（如果是震荡）
@@ -126,7 +175,7 @@ def build_structured_prompt(ai_json: Dict[str, Any], stats_context: str = "") ->
 请直接输出符合 Schema 的 JSON，不要有任何其他内容：
 """
     
-    return system_block + "\n" + history_block + stat_block + "\n" + structure_block + "\n" + output_block
+    return TERMINOLOGY_BLOCK + "\n" + system_block + "\n" + history_block + summary_block + "\n" + stat_block + "\n" + structure_block + "\n" + output_block
 
 
 def build_prompt(ai_json: Dict[str, Any]) -> str:
@@ -419,4 +468,128 @@ def build_structured_table_prompt(ai_json: Dict[str, Any]) -> str:
 ```
 
 请直接输出符合 Schema 的 JSON，不要有任何其他内容：
+"""
+
+
+def build_multi_level_prompt(multi_level_data: Dict[str, Any]) -> str:
+    """构造多级别联立分析 Prompt
+    
+    参数：
+    - multi_level_data: 多级别分析数据，包含 large/medium/small 三个级别
+    
+    返回：
+    - 多级别分析的结构化 Prompt
+    """
+    
+    schema = get_schema_template()
+    symbol = multi_level_data.get("symbol", "Unknown")
+    latest_price = multi_level_data.get("latest_price", 0)
+    levels = multi_level_data.get("levels", {})
+    
+    # 提取各级别摘要
+    large = levels.get("large", {})
+    medium = levels.get("medium", {})
+    small = levels.get("small", {})
+    
+    large_summary = large.get("summary", {})
+    medium_summary = medium.get("summary", {})
+    small_summary = small.get("summary", {})
+    
+    # 构造级别摘要表格
+    def format_level_summary(name: str, interval: str, summary: Dict) -> str:
+        trend = summary.get("trend", "unknown")
+        trend_map = {"up_trend": "上升趋势", "down_trend": "下降趋势", "consolidation": "震荡盘整", "unknown": "未知"}
+        pos = summary.get("price_vs_zs", "unknown")
+        pos_map = {"above": "中枢上方", "below": "中枢下方", "inside": "中枢内部", "unknown": "无中枢"}
+        
+        zs_info = ""
+        if summary.get("latest_zs"):
+            zs = summary["latest_zs"]
+            zs_info = f"ZG={zs['zg']:.0f}, ZD={zs['zd']:.0f}"
+        
+        signals = ", ".join(summary.get("recent_mmds", [])) or "无"
+        
+        return f"""### {name} ({interval})
+- 趋势: {trend_map.get(trend, trend)}
+- 价格位置: {pos_map.get(pos, pos)}
+- 中枢: {zs_info or '无'}
+- 买卖点信号: {signals}
+- 笔数量: {summary.get('bi_count', 0)}, 线段数量: {summary.get('xd_count', 0)}, 中枢数量: {summary.get('zs_count', 0)}
+"""
+    
+    large_text = format_level_summary(large.get("name", "大级别"), large.get("interval", "4h"), large_summary)
+    medium_text = format_level_summary(medium.get("name", "中级别"), medium.get("interval", "1h"), medium_summary)
+    small_text = format_level_summary(small.get("name", "小级别"), small.get("interval", "15m"), small_summary)
+    
+    # 详细数据（中级别的完整 JSON）
+    medium_json = json.dumps(medium.get("ai_json", {}), ensure_ascii=False, indent=2)
+    
+    return f"""# 缠论多级别联立分析
+
+你是一名精通缠论的数字货币交易分析师。请根据以下【多级别缠论数据】进行综合分析。
+
+{TERMINOLOGY_BLOCK}
+
+## 多级别分析核心原则
+
+1. **大级别定方向**：大级别趋势决定主要操作方向
+2. **中级别找买卖点**：中级别结构确定买卖点位置
+3. **小级别精入场**：小级别结构确定精确入场时机
+
+## 当前品种
+- **交易对**: {symbol}
+- **当前价格**: {latest_price:.2f}
+
+---
+
+## 多级别结构摘要
+
+{large_text}
+{medium_text}
+{small_text}
+
+---
+
+## 中级别详细数据
+
+```json
+{medium_json}
+```
+
+---
+
+## 输出要求
+
+【系统约束】
+你是一个【缠论多级别联立分析引擎】。
+必须综合三个级别的结构进行分析，不能只看单一级别。
+
+【分析重点】
+1. 三级别趋势是否一致？（一致性越高，信号越可靠）
+2. 大级别处于什么位置？（决定操作方向）
+3. 中级别有无买卖点？（确定交易信号）
+4. 小级别是否可以入场？（确定入场时机）
+
+【严禁事项】
+- 禁止使用技术指标（均线、MACD、RSI 等）
+- 禁止引入外部行情、消息、情绪
+- 禁止只分析单一级别
+
+【输出格式】
+严格按照以下 JSON Schema 输出：
+
+```json
+{schema}
+```
+
+【特殊要求】
+1. analysis 字段必须包含多级别联立分析内容：
+   - 大级别趋势判断
+   - 中级别买卖点分析
+   - 小级别入场时机
+   - 三级别一致性评估
+2. primary_scenario 的 reasoning 必须说明多级别配合关系
+3. 概率评估需要考虑多级别趋势一致性
+
+请直接输出符合 Schema 的 JSON：
 """
