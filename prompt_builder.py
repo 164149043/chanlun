@@ -44,12 +44,19 @@ TERMINOLOGY_BLOCK = """
 """
 
 
-def build_structured_prompt(ai_json: Dict[str, Any], stats_context: str = "") -> str:
-    """构造结构化输出 Prompt（强制 JSON 输出，含 A2.5 统计提示 + 历史表现）
+def build_structured_prompt(
+    ai_json: Dict[str, Any],
+    stats_context: str = "",
+    history_context: str = "",
+    learning_feedback: str = "",
+) -> str:
+    """构造结构化输出 Prompt（强制 JSON 输出，含统计提示 + 历史表现 + 相似案例 + 自我认知）
     
     参数：
     - ai_json: 符合规范的 AI 输入 JSON
-    - stats_context: 历史统计上下文（可选）
+    - stats_context: 历史统计上下文（可选，整体表现）
+    - history_context: 相似案例上下文（可选，P0新增）
+    - learning_feedback: AI自我认知/学习反馈（可选，Step1新增）
     
     返回：
     - 强制约束的 Prompt 字符串
@@ -128,6 +135,16 @@ def build_structured_prompt(ai_json: Dict[str, Any], stats_context: str = "") ->
     if stats_context:
         history_block = stats_context + "\n"
     
+    # === 相似案例上下文（P0新增） ===
+    similar_cases_block = ""
+    if history_context:
+        similar_cases_block = history_context + "\n"
+    
+    # === AI自我认知（Step1新增） ===
+    learning_block = ""
+    if learning_feedback:
+        learning_block = learning_feedback + "\n"
+    
     # === 缠论结构 JSON ===
     structure_block = f"""
 【缠论结构 JSON】
@@ -175,14 +192,22 @@ def build_structured_prompt(ai_json: Dict[str, Any], stats_context: str = "") ->
 请直接输出符合 Schema 的 JSON，不要有任何其他内容：
 """
     
-    return TERMINOLOGY_BLOCK + "\n" + system_block + "\n" + history_block + summary_block + "\n" + stat_block + "\n" + structure_block + "\n" + output_block
+    return TERMINOLOGY_BLOCK + "\n" + system_block + "\n" + learning_block + history_block + similar_cases_block + summary_block + "\n" + stat_block + "\n" + structure_block + "\n" + output_block
 
 
-def build_prompt(ai_json: Dict[str, Any]) -> str:
-    """构造 AI 分析 Prompt
+def build_prompt(
+    ai_json: Dict[str, Any],
+    stats_context: str = "",
+    history_context: str = "",
+    learning_feedback: str = "",
+) -> str:
+    """构造 AI 分析 Prompt（增强版，支持历史上下文注入）
     
     参数：
     - ai_json: 符合规范的 AI 输入 JSON
+    - stats_context: 历史统计上下文（可选）
+    - history_context: 相似案例上下文（可选）
+    - learning_feedback: AI自我认知/学习反馈（可选）
     
     返回：
     - 完整的 Prompt 字符串
@@ -190,8 +215,31 @@ def build_prompt(ai_json: Dict[str, Any]) -> str:
     
     json_str = json.dumps(ai_json, ensure_ascii=False, indent=2)
     
+    # 构建历史上下文块
+    context_blocks = []
+    
+    if learning_feedback:
+        context_blocks.append(f"""【AI历史表现自我认知】
+{learning_feedback}
+请根据上述历史表现，在分析时保持适度谨慎，尤其注意你的弱项领域。
+""")
+    
+    if history_context:
+        context_blocks.append(f"""【相似案例历史参考】
+{history_context}
+请参考上述相似案例的历史表现，合理评估预测的可靠性。
+""")
+    
+    if stats_context:
+        context_blocks.append(f"""【历史统计提示】
+{stats_context}
+""")
+    
+    context_section = "\n".join(context_blocks) if context_blocks else ""
+    
     return f"""你是一名精通缠论的数字货币交易分析师。
 
+{context_section}
 请根据以下【结构化缠论数据】，对后续走势进行判断。
 
 【输出要求】
@@ -206,6 +254,7 @@ def build_prompt(ai_json: Dict[str, Any]) -> str:
 - ✅ 只能使用：笔、线段、中枢、买卖点、背驰、级别
 - ✅ 输出格式：简洁、清晰、可直接给交易者看的分析文字
 - ✅ 语言：中文
+- ✅ 如有历史表现数据，请在分析中体现谨慎程度
 
 【缠论结构数据】
 ```json
@@ -262,14 +311,22 @@ def build_simple_prompt(ai_json: Dict[str, Any]) -> str:
 请简洁分析："""
 
 
-def build_table_format_prompt(ai_json: Dict[str, Any]) -> str:
-    """构造表格格式的缠论分析 Prompt（输出 Markdown）
+def build_table_format_prompt(
+    ai_json: Dict[str, Any],
+    stats_context: str = "",
+    history_context: str = "",
+    learning_feedback: str = "",
+) -> str:
+    """构造表格格式的缠论分析 Prompt（增强版，支持历史上下文）
     
     这个 Prompt 专门用于处理包含表格数据的输入，
     要求 AI 输出结构化的 Markdown 分析报告。
     
     参数：
     - ai_json: 符合规范的 AI 输入 JSON
+    - stats_context: 历史统计上下文（可选）
+    - history_context: 相似案例上下文（可选）
+    - learning_feedback: AI自我认知/学习反馈（可选）
     
     返回：
     - Markdown 格式的 Prompt
@@ -320,10 +377,39 @@ def build_table_format_prompt(ai_json: Dict[str, Any]) -> str:
         
         center_table += f"{start_time}\t{end_time}\t{zs_type}\t{high}\t{low}\t{level}\t{relation}\n"
     
+    # 构建历史上下文块
+    context_blocks = []
+    
+    if learning_feedback:
+        context_blocks.append(f"""## AI历史表现自我认知
+
+{learning_feedback}
+
+> 请根据上述历史表现，在分析时保持适度谨慎，尤其注意弱项领域。
+""")
+    
+    if history_context:
+        context_blocks.append(f"""## 相似案例历史参考
+
+{history_context}
+
+> 请参考上述相似案例的历史表现，合理评估预测的可靠性。
+""")
+    
+    if stats_context:
+        context_blocks.append(f"""## 历史统计提示
+
+{stats_context}
+""")
+    
+    context_section = "\n---\n\n".join(context_blocks) if context_blocks else ""
+    if context_section:
+        context_section = "\n---\n\n" + context_section
+    
     return f"""# 缠论技术分析：{meta.get('symbol', 'Unknown')} 走势分析
 
 请根据以下缠论数据，分析后续可能走势，并按照**标准格式**输出。
-
+{context_section}
 ---
 
 ## 输入数据
