@@ -1,0 +1,59 @@
+{
+  "version": "1.0",
+  "method": "correlation",
+  "sample_count": 982,
+  "weights": {
+    "signal_type": 5,
+    "trend": 23.500000000000007,
+    "position": 13.6,
+    "strength": 23.4,
+    "history": 5,
+    "risk_reward": 29.5
+  },
+  "default_weights": {
+    "signal_type": 20,
+    "trend": 20,
+    "position": 15,
+    "strength": 15,
+    "history": 20,
+    "risk_reward": 10
+  },
+  "dimension_stats": {
+    "signal_type": {
+      "correlation": 0.0092,
+      "predictive_power": -0.0407,
+      "high_score_win_rate": 0.1553,
+      "low_score_win_rate": 0.196
+    },
+    "trend": {
+      "correlation": -0.2641,
+      "predictive_power": 0.2398,
+      "high_score_win_rate": 0,
+      "low_score_win_rate": 0.2602
+    },
+    "position": {
+      "correlation": -0.1159,
+      "predictive_power": -0.4544,
+      "high_score_win_rate": 0.0456,
+      "low_score_win_rate": 0
+    },
+    "strength": {
+      "correlation": -0.1991,
+      "predictive_power": -0.3734,
+      "high_score_win_rate": 0.0743,
+      "low_score_win_rate": 0.4478
+    },
+    "history": {
+      "correlation": 0.0,
+      "predictive_power": 0.3259,
+      "high_score_win_rate": 0,
+      "low_score_win_rate": 0.1741
+    },
+    "risk_reward": {
+      "correlation": -0.2506,
+      "predictive_power": -0.1714,
+      "high_score_win_rate": 0.1184,
+      "low_score_win_rate": 0.2899
+    }
+  }
+}
