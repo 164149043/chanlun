@@ -2,21 +2,34 @@
 """信号质量评分模块
 
 根据多个维度对交易信号进行质量评分（0-100分）：
-1. 买卖点类型（0-20分）
-2. 趋势一致性（0-20分）
-3. 价格位置（0-15分）
-4. 力度背驰（0-15分）
-5. 历史胜率（0-20分）
-6. 波动率适中（0-10分）
+1. 买卖点类型（可配置权重）
+2. 趋势一致性（可配置权重）
+3. 价格位置（可配置权重）
+4. 力度背驰（可配置权重）
+5. 历史胜率（可配置权重）
+6. 盈亏比（可配置权重）
 
 评分等级：
 - 80-100: 优质信号（建议交易）
 - 60-79:  良好信号（可以交易）
 - 40-59:  一般信号（谨慎交易）
 - 0-39:   低质信号（建议观望）
+
+权重优化：
+- 使用 weight_optimizer.py 可自动基于历史数据优化权重
+- 优化后的权重保存在 optimized_weights.json
 """
 import os
-os.system('chcp 65001 >nul 2>&1')
+import sys
+
+# Windows 终端编码修复
+if sys.platform == 'win32':
+    os.system('chcp 65001 >nul 2>&1')
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except AttributeError:
+        pass
 
 import sqlite3
 import json
@@ -25,6 +38,35 @@ from typing import Dict, Any, Optional, Tuple
 from collections import defaultdict
 
 DB_PATH = Path(__file__).parent / "chanlun_ai.db"
+WEIGHTS_PATH = Path(__file__).parent / "optimized_weights.json"
+
+# 默认权重（经验值）
+DEFAULT_WEIGHTS = {
+    "signal_type": 20,
+    "trend": 20,
+    "position": 15,
+    "strength": 15,
+    "history": 20,
+    "risk_reward": 10,
+}
+
+
+def _load_weights() -> Dict[str, float]:
+    """加载权重配置（优先使用优化后的权重）"""
+    if WEIGHTS_PATH.exists():
+        try:
+            with open(WEIGHTS_PATH, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            weights = config.get("weights", {})
+            if weights:
+                return weights
+        except Exception:
+            pass
+    return DEFAULT_WEIGHTS.copy()
+
+
+# 全局权重配置
+WEIGHTS = _load_weights()
 
 
 # ============================================
@@ -177,8 +219,8 @@ def _get_win_rate(stats_dict: dict, key: str) -> float:
 # 评分函数
 # ============================================
 
-def score_signal_type(signal_type: str, direction: str) -> Tuple[float, str]:
-    """评分：买卖点类型（0-20分）
+def score_signal_type(signal_type: str, direction: str, max_score: float = None) -> Tuple[float, str]:
+    """评分：买卖点类型
     
     评分逻辑：
     - 方向一致的买卖点得分高
@@ -186,137 +228,141 @@ def score_signal_type(signal_type: str, direction: str) -> Tuple[float, str]:
     - 背驰信号次之
     - 无信号或方向冲突得分低
     """
-    # 买入信号 + 看涨
+    if max_score is None:
+        max_score = WEIGHTS.get("signal_type", 20)
+    
+    # 计算得分比例
     if direction == "up":
         if signal_type in ["1buy", "bc_buy"]:
-            return 20, "一买/底背驰 + 看涨，强买入信号"
+            ratio, reason = 1.0, "一买/底背驰 + 看涨，强买入信号"
         elif signal_type == "2buy":
-            return 18, "二买 + 看涨，较强买入信号"
+            ratio, reason = 0.9, "二买 + 看涨，较强买入信号"
         elif signal_type == "3buy":
-            return 15, "三买 + 看涨，回调买入信号"
+            ratio, reason = 0.75, "三买 + 看涨，回调买入信号"
         elif signal_type in ["1sell", "2sell", "3sell", "bc_sell"]:
-            return 5, "卖出信号 + 看涨，方向冲突"
+            ratio, reason = 0.25, "卖出信号 + 看涨，方向冲突"
         elif signal_type == "mixed":
-            return 10, "混合信号 + 看涨"
+            ratio, reason = 0.5, "混合信号 + 看涨"
         else:
-            return 8, "无明确信号 + 看涨"
-    
-    # 卖出信号 + 看跌
+            ratio, reason = 0.4, "无明确信号 + 看涨"
     elif direction == "down":
         if signal_type in ["1sell", "bc_sell"]:
-            return 20, "一卖/顶背驰 + 看跌，强卖出信号"
+            ratio, reason = 1.0, "一卖/顶背驰 + 看跌，强卖出信号"
         elif signal_type == "2sell":
-            return 18, "二卖 + 看跌，较强卖出信号"
+            ratio, reason = 0.9, "二卖 + 看跌，较强卖出信号"
         elif signal_type == "3sell":
-            return 15, "三卖 + 看跌，反弹卖出信号"
+            ratio, reason = 0.75, "三卖 + 看跌，反弹卖出信号"
         elif signal_type in ["1buy", "2buy", "3buy", "bc_buy"]:
-            return 5, "买入信号 + 看跌，方向冲突"
+            ratio, reason = 0.25, "买入信号 + 看跌，方向冲突"
         elif signal_type == "mixed":
-            return 10, "混合信号 + 看跌"
+            ratio, reason = 0.5, "混合信号 + 看跌"
         else:
-            return 8, "无明确信号 + 看跌"
-    
-    # 震荡
+            ratio, reason = 0.4, "无明确信号 + 看跌"
     else:
-        return 10, "震荡方向，信号参考价值有限"
+        ratio, reason = 0.5, "震荡方向，信号参考价值有限"
+    
+    return round(ratio * max_score, 1), reason
 
 
-def score_trend_consistency(trend: str, direction: str) -> Tuple[float, str]:
-    """评分：趋势一致性（0-20分）
+def score_trend_consistency(trend: str, direction: str, max_score: float = None) -> Tuple[float, str]:
+    """评分：趋势一致性
     
     评分逻辑：
     - 顺势交易得分高
     - 逆势交易得分低
     - 震荡中性
     """
+    if max_score is None:
+        max_score = WEIGHTS.get("trend", 20)
+    
     if direction == "up":
         if trend == "up_trend":
-            return 20, "上升趋势 + 看涨，顺势做多"
+            ratio, reason = 1.0, "上升趋势 + 看涨，顺势做多"
         elif trend == "consolidation":
-            return 12, "震荡 + 看涨，需等待突破确认"
+            ratio, reason = 0.6, "震荡 + 看涨，需等待突破确认"
         elif trend == "down_trend":
-            return 5, "下降趋势 + 看涨，逆势操作风险高"
+            ratio, reason = 0.25, "下降趋势 + 看涨，逆势操作风险高"
         else:
-            return 10, "趋势未知"
-    
+            ratio, reason = 0.5, "趋势未知"
     elif direction == "down":
         if trend == "down_trend":
-            return 20, "下降趋势 + 看跌，顺势做空"
+            ratio, reason = 1.0, "下降趋势 + 看跌，顺势做空"
         elif trend == "consolidation":
-            return 12, "震荡 + 看跌，需等待破位确认"
+            ratio, reason = 0.6, "震荡 + 看跌，需等待破位确认"
         elif trend == "up_trend":
-            return 5, "上升趋势 + 看跌，逆势操作风险高"
+            ratio, reason = 0.25, "上升趋势 + 看跌，逆势操作风险高"
         else:
-            return 10, "趋势未知"
-    
+            ratio, reason = 0.5, "趋势未知"
     else:
         if trend == "consolidation":
-            return 15, "震荡行情，高抛低吸策略"
+            ratio, reason = 0.75, "震荡行情，高抛低吸策略"
         else:
-            return 10, "方向不明确"
+            ratio, reason = 0.5, "方向不明确"
+    
+    return round(ratio * max_score, 1), reason
 
 
-def score_price_position(position: str, direction: str) -> Tuple[float, str]:
-    """评分：价格位置（0-15分）
+def score_price_position(position: str, direction: str, max_score: float = None) -> Tuple[float, str]:
+    """评分：价格位置
     
     评分逻辑：
     - 中枢下方做多 / 中枢上方做空 得分高（有空间）
     - 中枢内部得分中等
     - 中枢上方做多 / 中枢下方做空 得分低（空间有限）
     """
+    if max_score is None:
+        max_score = WEIGHTS.get("position", 15)
+    
     if direction == "up":
         if position == "below_zs":
-            return 15, "价格在中枢下方，做多空间充足"
+            ratio, reason = 1.0, "价格在中枢下方，做多空间充足"
         elif position == "inside_zs":
-            return 12, "价格在中枢内部，等待方向选择"
+            ratio, reason = 0.8, "价格在中枢内部，等待方向选择"
         elif position == "above_zs":
-            return 8, "价格在中枢上方，追涨风险"
+            ratio, reason = 0.53, "价格在中枢上方，追涨风险"
         else:
-            return 10, "位置未知"
-    
+            ratio, reason = 0.67, "位置未知"
     elif direction == "down":
         if position == "above_zs":
-            return 15, "价格在中枢上方，做空空间充足"
+            ratio, reason = 1.0, "价格在中枢上方，做空空间充足"
         elif position == "inside_zs":
-            return 12, "价格在中枢内部，等待方向选择"
+            ratio, reason = 0.8, "价格在中枢内部，等待方向选择"
         elif position == "below_zs":
-            return 8, "价格在中枢下方，追跌风险"
+            ratio, reason = 0.53, "价格在中枢下方，追跌风险"
         else:
-            return 10, "位置未知"
-    
+            ratio, reason = 0.67, "位置未知"
     else:
         if position == "inside_zs":
-            return 15, "价格在中枢内部，震荡策略有效"
+            ratio, reason = 1.0, "价格在中枢内部，震荡策略有效"
         else:
-            return 10, "价格远离中枢"
+            ratio, reason = 0.67, "价格远离中枢"
+    
+    return round(ratio * max_score, 1), reason
 
 
-def score_strength_divergence(strength: str, has_divergence: bool, direction: str) -> Tuple[float, str]:
-    """评分：力度背驰（0-15分）
+def score_strength_divergence(strength: str, has_divergence: bool, direction: str, max_score: float = None) -> Tuple[float, str]:
+    """评分：力度背驰
     
     评分逻辑：
     - 力度衰竭 + 反向操作 得分高
     - 有背驰信号加分
     - 力度增强但逆势操作扣分
     """
-    base_score = 7
+    if max_score is None:
+        max_score = WEIGHTS.get("strength", 15)
+    
+    base_ratio = 0.47
     reason_parts = []
     
     # 力度评估
     if strength == "weakening":
-        if direction == "up":  # 下跌力度衰竭，做多
-            base_score += 5
-            reason_parts.append("下跌力度衰竭")
-        elif direction == "down":  # 上涨力度衰竭，做空
-            base_score += 5
-            reason_parts.append("上涨力度衰竭")
+        if direction in ["up", "down"]:
+            base_ratio = 0.8
+            reason_parts.append("力度衰竭")
     elif strength == "strengthening":
-        if direction == "up":  # 上涨力度增强，做多
-            base_score += 3
-            reason_parts.append("上涨力度增强")
-        elif direction == "down":  # 下跌力度增强，做空
-            base_score += 3
-            reason_parts.append("下跌力度增强")
+        if direction in ["up", "down"]:
+            base_ratio = 0.67
+            reason_parts.append("力度增强")
     elif strength == "similar":
         reason_parts.append("力度相近")
     else:
@@ -324,23 +370,26 @@ def score_strength_divergence(strength: str, has_divergence: bool, direction: st
     
     # 背驰加分
     if has_divergence:
-        base_score += 3
+        base_ratio = min(1.0, base_ratio + 0.2)
         reason_parts.append("存在背驰信号")
     
-    return min(15, base_score), "，".join(reason_parts) if reason_parts else "力度正常"
+    return round(base_ratio * max_score, 1), "，".join(reason_parts) if reason_parts else "力度正常"
 
 
-def score_history_winrate(signal_type: str, direction: str) -> Tuple[float, str]:
-    """评分：历史胜率（0-20分）
+def score_history_winrate(signal_type: str, direction: str, max_score: float = None) -> Tuple[float, str]:
+    """评分：历史胜率
     
     评分逻辑：
     - 基于历史数据的同类信号胜率
     - 组合胜率（信号+方向）权重更高
     """
+    if max_score is None:
+        max_score = WEIGHTS.get("history", 20)
+    
     stats = _load_history_stats()
     
     if not stats:
-        return 10, "历史数据不足"
+        return round(0.5 * max_score, 1), "历史数据不足"
     
     # 获取组合胜率
     combo_key = f"{signal_type}_{direction}"
@@ -354,9 +403,8 @@ def score_history_winrate(signal_type: str, direction: str) -> Tuple[float, str]
     # 加权平均（组合权重60%，信号权重40%）
     avg_wr = combo_wr * 0.6 + signal_wr * 0.4
     
-    # 映射到分数（0-20）
-    # 胜率 0% -> 0分，50% -> 10分，100% -> 20分
-    score = avg_wr * 20
+    # 映射到分数（胜率作为比例）
+    score = avg_wr * max_score
     
     # 获取样本数
     combo_total = combo_stats.get(combo_key, {}).get("total", 0)
@@ -373,29 +421,34 @@ def score_history_winrate(signal_type: str, direction: str) -> Tuple[float, str]
     return round(score, 1), reason
 
 
-def score_volatility(target_pct: float, stop_pct: float) -> Tuple[float, str]:
-    """评分：盈亏比合理性（0-10分）
+def score_volatility(target_pct: float, stop_pct: float, max_score: float = None) -> Tuple[float, str]:
+    """评分：盈亏比合理性
     
     评分逻辑：
     - 盈亏比（目标/止损）>= 2 得高分
     - 盈亏比 1-2 中等
     - 盈亏比 < 1 低分
     """
+    if max_score is None:
+        max_score = WEIGHTS.get("risk_reward", 10)
+    
     if stop_pct <= 0:
-        return 5, "止损参数异常"
+        return round(0.5 * max_score, 1), "止损参数异常"
     
     rr_ratio = target_pct / stop_pct
     
     if rr_ratio >= 3:
-        return 10, f"盈亏比 {rr_ratio:.1f}:1，风险收益极佳"
+        ratio, reason = 1.0, f"盈亏比 {rr_ratio:.1f}:1，风险收益极佳"
     elif rr_ratio >= 2:
-        return 8, f"盈亏比 {rr_ratio:.1f}:1，风险收益良好"
+        ratio, reason = 0.8, f"盈亏比 {rr_ratio:.1f}:1，风险收益良好"
     elif rr_ratio >= 1.5:
-        return 6, f"盈亏比 {rr_ratio:.1f}:1，风险收益一般"
+        ratio, reason = 0.6, f"盈亏比 {rr_ratio:.1f}:1，风险收益一般"
     elif rr_ratio >= 1:
-        return 4, f"盈亏比 {rr_ratio:.1f}:1，风险收益较差"
+        ratio, reason = 0.4, f"盈亏比 {rr_ratio:.1f}:1，风险收益较差"
     else:
-        return 2, f"盈亏比 {rr_ratio:.1f}:1，风险大于收益"
+        ratio, reason = 0.2, f"盈亏比 {rr_ratio:.1f}:1，风险大于收益"
+    
+    return round(ratio * max_score, 1), reason
 
 
 # ============================================
@@ -437,37 +490,47 @@ def calculate_signal_quality(
     signal_type = _classify_signal(buy_sell_points, divergences)
     has_divergence = bool(divergences)
     
+    # 加载当前权重配置
+    weights = WEIGHTS
+    
     # 计算各维度得分
     scores = {}
     reasons = {}
+    max_scores = {}
     
-    # 1. 信号类型（20分）
-    s1, r1 = score_signal_type(signal_type, direction)
+    # 1. 信号类型
+    max_scores["signal_type"] = weights.get("signal_type", 20)
+    s1, r1 = score_signal_type(signal_type, direction, max_scores["signal_type"])
     scores["signal_type"] = s1
     reasons["signal_type"] = r1
     
-    # 2. 趋势一致性（20分）
-    s2, r2 = score_trend_consistency(trend, direction)
+    # 2. 趋势一致性
+    max_scores["trend"] = weights.get("trend", 20)
+    s2, r2 = score_trend_consistency(trend, direction, max_scores["trend"])
     scores["trend"] = s2
     reasons["trend"] = r2
     
-    # 3. 价格位置（15分）
-    s3, r3 = score_price_position(position, direction)
+    # 3. 价格位置
+    max_scores["position"] = weights.get("position", 15)
+    s3, r3 = score_price_position(position, direction, max_scores["position"])
     scores["position"] = s3
     reasons["position"] = r3
     
-    # 4. 力度背驰（15分）
-    s4, r4 = score_strength_divergence(strength, has_divergence, direction)
+    # 4. 力度背驰
+    max_scores["strength"] = weights.get("strength", 15)
+    s4, r4 = score_strength_divergence(strength, has_divergence, direction, max_scores["strength"])
     scores["strength"] = s4
     reasons["strength"] = r4
     
-    # 5. 历史胜率（20分）
-    s5, r5 = score_history_winrate(signal_type, direction)
+    # 5. 历史胜率
+    max_scores["history"] = weights.get("history", 20)
+    s5, r5 = score_history_winrate(signal_type, direction, max_scores["history"])
     scores["history"] = s5
     reasons["history"] = r5
     
-    # 6. 盈亏比（10分）
-    s6, r6 = score_volatility(target_pct, stop_pct)
+    # 6. 盈亏比
+    max_scores["risk_reward"] = weights.get("risk_reward", 10)
+    s6, r6 = score_volatility(target_pct, stop_pct, max_scores["risk_reward"])
     scores["risk_reward"] = s6
     reasons["risk_reward"] = r6
     
@@ -524,10 +587,12 @@ def calculate_signal_quality(
         "action": action,
         "action_name": action_name,
         "scores": scores,
+        "max_scores": max_scores,
         "reasons": reasons,
         "advice": "；".join(advice_parts),
         "signal_type": signal_type,
         "direction": direction,
+        "weights_optimized": WEIGHTS_PATH.exists(),
     }
 
 
@@ -552,24 +617,27 @@ def format_quality_report(quality: Dict[str, Any]) -> str:
     lines.append("\n  【各维度得分】")
     lines.append("-" * 60)
     
+    # 使用动态权重
+    weights = WEIGHTS
     dim_names = {
-        "signal_type": ("信号类型", 20),
-        "trend": ("趋势一致性", 20),
-        "position": ("价格位置", 15),
-        "strength": ("力度背驰", 15),
-        "history": ("历史胜率", 20),
-        "risk_reward": ("盈亏比", 10),
+        "signal_type": "信号类型",
+        "trend": "趋势一致性",
+        "position": "价格位置",
+        "strength": "力度背驰",
+        "history": "历史胜率",
+        "risk_reward": "盈亏比",
     }
     
     scores = quality["scores"]
     reasons = quality["reasons"]
     
-    for key, (name, max_score) in dim_names.items():
+    for key, name in dim_names.items():
+        max_score = weights.get(key, 10)
         score = scores.get(key, 0)
         reason = reasons.get(key, "")
-        bar_len = int(score / max_score * 10)
+        bar_len = int(score / max_score * 10) if max_score > 0 else 0
         bar = "#" * bar_len + "-" * (10 - bar_len)
-        lines.append(f"  {name:<10} [{bar}] {score:>5.1f}/{max_score}")
+        lines.append(f"  {name:<10} [{bar}] {score:>5.1f}/{max_score:.0f}")
         if reason:
             lines.append(f"              {reason}")
     
