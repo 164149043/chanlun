@@ -58,6 +58,34 @@ try:
 except ImportError:
     STATS_AVAILABLE = False
 
+# 导入历史上下文模块（P0新增）
+try:
+    from history_context import get_history_context
+    HISTORY_CONTEXT_AVAILABLE = True
+except ImportError:
+    HISTORY_CONTEXT_AVAILABLE = False
+
+# 导入逻辑验证模块（P2新增）
+try:
+    from logic_validator import validate_ai_output as validate_logic, format_validation_report
+    LOGIC_VALIDATOR_AVAILABLE = True
+except ImportError:
+    LOGIC_VALIDATOR_AVAILABLE = False
+
+# 导入学习反馈模块（Step1新增）
+try:
+    from learning_feedback import get_learning_feedback, LearningReport
+    LEARNING_FEEDBACK_AVAILABLE = True
+except ImportError:
+    LEARNING_FEEDBACK_AVAILABLE = False
+
+# 导入置信度约束模块（Step3新增）
+try:
+    from confidence_constraint import apply_confidence_constraints, format_constraint_result
+    CONFIDENCE_CONSTRAINT_AVAILABLE = True
+except ImportError:
+    CONFIDENCE_CONSTRAINT_AVAILABLE = False
+
 
 # ============================================
 # 数据库功能（SQLite）
@@ -509,6 +537,45 @@ def main():
         except Exception as e:
             print(f"   ⚠️  统计数据加载失败: {e}")
     
+    # ========================================
+    # 4.6. 获取历史上下文（所有模式通用）
+    # ========================================
+    history_context_text = ""
+    learning_feedback_text = ""
+    learning_report = None
+    
+    # 只在非 simple 模式下获取历史上下文（simple 模式追求速度）
+    if not args.simple:
+        # P0：获取相似案例历史上下文
+        if HISTORY_CONTEXT_AVAILABLE:
+            try:
+                history_context_text, history_stats = get_history_context(
+                    symbol=display_symbol,
+                    interval=interval,
+                    chanlun_json=ai_json,
+                )
+                if history_stats.get("has_data"):
+                    print(f"   🔍 找到 {history_stats['total']} 条相似案例")
+                    print(f"   📈 相似案例胜率: {history_stats['win_rate']*100:.1f}%")
+                    print(f"   💡 建议: {history_stats['suggestion']}")
+            except Exception as hc_err:
+                print(f"   ⚠️  历史上下文加载失败: {hc_err}")
+        
+        # Step1：获取AI学习反馈（自我认知）
+        if LEARNING_FEEDBACK_AVAILABLE:
+            try:
+                learning_feedback_text, learning_report = get_learning_feedback(
+                    days=30,
+                    symbol=display_symbol,
+                    interval=interval,
+                )
+                if learning_report and learning_report.total_predictions > 0:
+                    print(f"   🧠 AI自我认知: 历史胜率{learning_report.overall_win_rate*100:.1f}%")
+                    if learning_report.error_patterns:
+                        print(f"   ⚠️  发现 {len(learning_report.error_patterns)} 个错误模式")
+            except Exception as lf_err:
+                print(f"   ⚠️  学习反馈加载失败: {lf_err}")
+    
     try:
         # 构造 Prompt
         if args.structured and args.table:
@@ -517,24 +584,53 @@ def main():
             print("   📊 使用表格格式 Prompt + 强制 JSON 输出...")
             use_structured = True
         elif args.structured:
-            prompt = build_structured_prompt(ai_json, stats_context=stats_context)
+            # 使用已获取的历史上下文构造结构化 Prompt
+            prompt = build_structured_prompt(
+                ai_json,
+                stats_context=stats_context,
+                history_context=history_context_text,
+                learning_feedback=learning_feedback_text,
+            )
             print("   🔒 使用结构化 Prompt（强制 JSON 输出")
             if stats_context:
                 print("   📊 已注入历史统计数据")
+            if history_context_text:
+                print("   📚 已注入相似案例分析")
+            if learning_feedback_text:
+                print("   🧠 已注入AI自我认知")
             print("   ...")
             use_structured = True
         elif args.table:
-            # 表格格式 + Markdown 输出
-            prompt = build_table_format_prompt(ai_json)
+            # 表格格式 + Markdown 输出（注入历史上下文）
+            prompt = build_table_format_prompt(
+                ai_json,
+                stats_context=stats_context,
+                history_context=history_context_text,
+                learning_feedback=learning_feedback_text,
+            )
             print("   📊 使用表格格式 Prompt（输出 Markdown）...")
+            if history_context_text:
+                print("   📚 已注入相似案例分析")
+            if learning_feedback_text:
+                print("   🧠 已注入AI自我认知")
             use_structured = False
         elif args.simple:
             prompt = build_simple_prompt(ai_json)
-            print("   ⚡ 使用简化 Prompt...")
+            print("   ⚡ 使用简化 Prompt（跳过历史上下文以提高速度）...")
             use_structured = False
         else:
-            prompt = build_prompt(ai_json)
+            # 标准模式（注入历史上下文）
+            prompt = build_prompt(
+                ai_json,
+                stats_context=stats_context,
+                history_context=history_context_text,
+                learning_feedback=learning_feedback_text,
+            )
             print("   📝 使用标准 Prompt...")
+            if history_context_text:
+                print("   📚 已注入相似案例分析")
+            if learning_feedback_text:
+                print("   🧠 已注入AI自我认知")
             use_structured = False
             
         # 调用 AI
@@ -601,6 +697,75 @@ def main():
                         print("   ⚠️  统计模块不可用，跳过校验")
                     elif not stats_summary:
                         print("   ⚠️  统计数据为空，跳过校验")
+                
+                # ⭐ P2：AI分析逻辑验证
+                if LOGIC_VALIDATOR_AVAILABLE:
+                    try:
+                        logic_result = validate_logic(
+                            validated_output,
+                            chanlun_json=ai_json,
+                            current_price=latest_price,
+                            auto_fix=True,
+                        )
+                        
+                        if logic_result.has_critical_errors:
+                            print(f"   ⚠️  发现 {len(logic_result.errors)} 个严重逻辑错误")
+                            for err in logic_result.errors:
+                                print(f"      [{err.code}] {err.message}")
+                            # 使用修复后的输出
+                            if logic_result.fixed_output:
+                                validated_output = logic_result.fixed_output
+                                print("   🔧 已应用自动修复")
+                        elif logic_result.warnings:
+                            print(f"   ⚠️  发现 {len(logic_result.warnings)} 个逻辑警告")
+                        else:
+                            print("   ✓ 逻辑验证通过")
+                        
+                        # 将逻辑验证结果添加到输出
+                        validated_output["logic_validation"] = {
+                            "is_valid": logic_result.is_valid,
+                            "errors": len(logic_result.errors),
+                            "warnings": len(logic_result.warnings),
+                        }
+                    except Exception as lv_err:
+                        print(f"   ⚠️  逻辑验证失败: {lv_err}")
+                
+                # ⭐ Step3：置信度约束（基于学习反馈自动调整参数）
+                if CONFIDENCE_CONSTRAINT_AVAILABLE and learning_report:
+                    try:
+                        # 提取当前信号类型
+                        current_signal = None
+                        signal_data = ai_json.get("signal", {})
+                        buy_sell_points = signal_data.get("buy_sell_points", [])
+                        if buy_sell_points:
+                            for s in buy_sell_points:
+                                sl = s.lower()
+                                if "1buy" in sl: current_signal = "1buy"; break
+                                elif "2buy" in sl: current_signal = "2buy"; break
+                                elif "1sell" in sl: current_signal = "1sell"; break
+                                elif "2sell" in sl: current_signal = "2sell"; break
+                        
+                        validated_output, constraint_result = apply_confidence_constraints(
+                            validated_output,
+                            learning_report=learning_report,
+                            current_signal=current_signal,
+                        )
+                        
+                        if constraint_result.adjusted:
+                            print(f"   🎯 置信度约束已应用 (风险等级: {constraint_result.risk_level.upper()})")
+                            for adj in constraint_result.adjustments[:2]:  # 显示前2条调整
+                                print(f"      - {adj}")
+                        else:
+                            print("   ✓ 参数已在合理范围")
+                        
+                        # 添加约束结果到输出
+                        validated_output["confidence_constraint"] = {
+                            "adjusted": constraint_result.adjusted,
+                            "risk_level": constraint_result.risk_level,
+                            "probability_change": f"{constraint_result.original_probability:.0%} → {constraint_result.new_probability:.0%}",
+                        }
+                    except Exception as cc_err:
+                        print(f"   ⚠️  置信度约束失败: {cc_err}")
                 
                 # ⭐ 计算信号质量评分（保存到数据库前）
                 try:
