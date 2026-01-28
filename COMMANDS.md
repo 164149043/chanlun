@@ -63,6 +63,7 @@ python chanlun_ai.py <交易对> <周期> [选项]
   - 速度更快
   - 输出3-5句话总结
   - 不保存到数据库
+  - **不注入**历史上下文（追求速度）
 - **示例**：
   ```bash
   python chanlun_ai.py BTCUSDT 1h --simple
@@ -116,6 +117,17 @@ python chanlun_ai.py <交易对> <周期> [选项]
   ```bash
   python chanlun_ai.py BTCUSDT 1h --no-ai
   ```
+
+---
+
+### 历史上下文注入（新增）
+
+> **说明**：除了 `--simple` 模式外，所有分析模式都会自动注入以下历史上下文：
+> - 📚 **相似案例分析**：检索历史相似结构的表现
+> - 🧠 **AI自我认知**：AI的历史胜率、错误模式
+> - 📊 **历史统计数据**：整体命中率、平均得分
+
+这使得AI在分析时能"看到自己过去说过什么、准不准"，从而给出更谨慎、更可靠的预测。
 
 ---
 
@@ -363,7 +375,207 @@ python multi_level_analyzer.py ETHUSDT --intervals 1d,4h,1h --save
 
 ---
 
-### 6. evaluate_outcome.py - 结果回填工具
+### 6. learning_feedback.py - AI学习反馈报告
+
+#### 基础用法
+```bash
+python learning_feedback.py [选项]
+```
+
+#### 参数说明
+- `--days <天数>`：分析最近多少天的数据（默认：30）
+- `--symbol <交易对>`：过滤特定交易对
+- `--interval <周期>`：过滤特定周期
+
+#### 功能说明
+- **AI整体表现统计**：
+  - 按方向统计胜率（看涨/看跌/震荡）
+  - 按信号类型统计胜率
+  - 按周期统计胜率
+- **错误模式识别**：
+  - 目标设置过高
+  - 看涨预测准确率低
+  - 无信号时乱猜
+- **自我认知生成**：
+  - 生成注入Prompt的自我认知文本
+  - 告诉AI自己的历史表现和弱点
+
+#### 使用示例
+```bash
+# 查看最近30天的AI学习反馈报告
+python learning_feedback.py
+
+# 只看BTC的表现
+python learning_feedback.py --symbol "BTC/USDT"
+
+# 只看1h周期的表现
+python learning_feedback.py --interval 1h --days 60
+```
+
+---
+
+### 7. weight_optimizer.py - 信号质量权重优化
+
+#### 基础用法
+```bash
+python weight_optimizer.py [选项]
+```
+
+#### 参数说明
+- `--save`：保存优化后的权重到 `optimized_weights.json`
+- `--method <方法>`：优化方法（correlation/predictive/mixed）
+
+#### 功能说明
+- **预测力分析**：分析各维度（信号类型、趋势、位置等）对胜率的预测作用
+- **权重优化**：基于历史数据自动计算最优权重
+- **报告生成**：生成详细的优化分析报告
+
+#### 使用示例
+```bash
+# 查看权重优化分析报告
+python weight_optimizer.py
+
+# 保存优化后的权重
+python weight_optimizer.py --save
+
+# 使用预测力方法优化
+python weight_optimizer.py --save --method predictive
+```
+
+---
+
+### 8. logic_validator.py - AI分析逻辑验证
+
+#### 功能说明
+- **止损/目标验证**：检测做多时止损高于入场价等逻辑错误
+- **方向信号验证**：检测预测方向与买卖点信号冲突
+- **概率验证**：检测场景概率总和异常
+- **文字一致性验证**：检测文字分析与结构化数据不一致
+- **自动修复**：对可修复的错误自动修复
+
+#### 错误代码
+| 代码 | 类型 | 说明 |
+|------|------|------|
+| E001-E008 | 主场景验证 | 方向、目标、止损、盈亏比、概率 |
+| E009-E012 | 场景验证 | 概率、目标范围、方向一致性 |
+| E013-E014 | 信号一致性 | 方向与买卖点信号冲突 |
+| E015-E016 | 概率总和 | 场景概率总和验证 |
+| E019-E020 | 价格逻辑 | 止损价格逻辑错误 |
+
+---
+
+### 9. confidence_constraint.py - 置信度约束
+
+#### 功能说明
+- **基于历史表现自动调整**：
+  - 胜率<10%：大幅降低概率和目标
+  - 胜率<20%：适度降低
+  - 胜率≥40%：可适当提高
+- **目标幅度约束**：目标不超过历史实际变动的1.5倍
+- **盈亏比保证**：确保盈亏比≥1.5
+- **风险等级**：high/medium/low
+
+#### 使用示例
+```bash
+# 测试置信度约束
+python confidence_constraint.py
+```
+
+---
+
+### 10. learning_visualizer.py - 学习报告可视化
+
+#### 基础用法
+```bash
+python learning_visualizer.py [选项]
+```
+
+#### 参数说明
+- `--days <天数>`：分析最近多少天（默认：90）
+
+#### 功能说明
+- **表现仪表盘**：
+  - 按方向/信号类型/周期的胜率对比
+  - 目标偏差散点图（预测目标 vs 实际变动）
+  - 得分分布直方图
+  - 盈亏比分布图
+  - 学习曲线（滚动胜率趋势）
+- **错误模式分析**：
+  - 失败原因分布（止损触发/方向错误/未达目标）
+  - 方向预测正确率
+  - 时间分布（UTC小时）
+  - 错误类型统计
+
+#### 输出文件
+- `output/learning_dashboard_YYYYMMDD.png` - 表现仪表盘
+- `output/error_patterns_YYYYMMDD.png` - 错误模式图
+
+#### 使用示例
+```bash
+# 生成最近90天的学习报告可视化
+python learning_visualizer.py
+
+# 生成最近30天的报告
+python learning_visualizer.py --days 30
+```
+
+---
+
+### 11. backtest_validator.py - 回测验证
+
+#### 基础用法
+```bash
+python backtest_validator.py [选项]
+```
+
+#### 参数说明
+- `--days <天数>`：验证最近多少天（默认：90）
+
+#### 功能说明
+- **A/B测试对比**：
+  - 基准策略：原始AI预测
+  - 约束策略：应用置信度约束后
+  - 过滤策略：只执行高置信度预测
+- **验证指标**：
+  - 胜率改进幅度
+  - 止损率变化
+  - 平均得分提升
+- **可视化**：
+  - 滚动胜率对比曲线
+  - 策略平均胜率柱状图
+  - 累计收益曲线
+  - 历史胜率 vs 实际表现
+
+#### 输出文件
+- `output/backtest_comparison_YYYYMMDD.png` - 回测对比图
+
+#### 使用示例
+```bash
+# 运行完整回测验证
+python backtest_validator.py
+
+# 验证最近60天
+python backtest_validator.py --days 60
+```
+
+#### 输出示例
+```
+📊 回测验证 - A/B测试 (最近90天, N=156)
+
+指标              基准策略      约束策略      过滤策略      改进幅度
+-----------------------------------------------------------------
+胜率                15.4%        18.2%        28.6%       +18.2%
+止损率              23.1%        20.5%        15.4%       +11.3%
+平均得分            0.231        0.267        0.356       +15.6%
+
+📋 结论
+✅ 置信度约束显著提升了胜率
+✅ 过滤策略表现更优：胜率提升 13.2%
+```
+
+---
+
+### 12. evaluate_outcome.py - 结果回填工具
 
 #### 基础用法
 ```bash
@@ -429,19 +641,32 @@ AI_TEMPERATURE=0.3        # 采样温度（0-1）
 AI_MAX_TOKENS=4096        # 最大生成长度
 
 # K线数据配置
-DEFAULT_KLINE_LIMIT=200   # 默认K线数量
+DEFAULT_KLINE_LIMIT=500  # 默认K线数量
 ```
 
 ---
 
 ## 🕒 自动化调度（Windows 计划任务）
 
-### setup_scheduler.ps1 - 一键创建定时任务
+### 任务计划脚本说明
 
-- **作用**：在 Windows 任务计划程序中,自动创建 3 个定时任务,用来定期运行分析和评估:
-  - `ChanLun-AI-BTC-1h-Analysis`:每小时运行一次 `chanlun_ai.py BTCUSDT 1h --structured --limit 500`
-  - `ChanLun-AI-1h-Evaluate`:每小时运行一次 `evaluate_outcome.py 60`(评估所有交易对的 60 分钟前快照)
-  - `ChanLun-AI-ETH-1h-Analysis`:每小时运行一次 `chanlun_ai.py ETHUSDT 1h --structured --limit 500`
+项目提供了**按周期拆分**的独立任务计划脚本，便于灵活配置：
+
+| 脚本文件 | 周期 | 任务数量 | 说明 |
+|---------|------|---------|------|
+| `setup_scheduler_15m.ps1` | 15分钟 | 2个 | BTC + ETH 每15分钟分析 |
+| `setup_scheduler_1h.ps1` | 1小时 | 2个 | BTC + ETH 每小时分析 |
+| `setup_scheduler_4h.ps1` | 4小时 | 2个 | BTC + ETH 每4小时分析 |
+| `setup_scheduler.ps1` | 全部 | 6个 | 交互式菜单，可选择配置 |
+
+### setup_scheduler.ps1 - 主入口（交互式菜单）
+
+- **作用**：提供交互式菜单，可选择配置不同周期的任务
+- **功能**：
+  - `[1]` - 仅配置15分钟周期任务
+  - `[2]` - 仅配置1小时周期任务
+  - `[3]` - 仅配置4小时周期任务
+  - `[4]` - 配置所有周期任务（6个任务）
 
 ### 使用前准备
 
@@ -469,16 +694,31 @@ DEFAULT_KLINE_LIMIT=200   # 默认K线数量
 
 ### 执行脚本（PowerShell 7 示例）
 
+#### 方式 1：交互式菜单（推荐）
+
 ```powershell
-# 1. 打开 PowerShell（建议使用 PowerShell 7）
+# 1. 打开 PowerShell（建议使用 PowerShell 7，以管理员身份运行）
 # 2. 切换到脚本所在目录
 cd C:\Users\16414\Desktop\Qoder\chanlun
 
 # 3. 如果第一次运行脚本，可能需要临时放宽执行策略（只对当前进程生效）：
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
-# 4. 执行脚本，自动创建所有任务
+# 4. 执行主入口脚本，选择要配置的周期
 ./setup_scheduler.ps1
+```
+
+#### 方式 2：直接执行单个周期脚本
+
+```powershell
+# 只配置15分钟周期任务
+./setup_scheduler_15m.ps1
+
+# 只配置1小时周期任务
+./setup_scheduler_1h.ps1
+
+# 只配置4小时周期任务
+./setup_scheduler_4h.ps1
 ```
 
 ### 查看 / 手动运行 / 删除任务
@@ -488,16 +728,32 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 - **手动运行任务测试**(PowerShell):
   ```powershell
+  # 15分钟周期
+  Start-ScheduledTask -TaskName "ChanLun-AI-BTC-15m-Analysis"
+  Start-ScheduledTask -TaskName "ChanLun-AI-ETH-15m-Analysis"
+  
+  # 1小时周期
   Start-ScheduledTask -TaskName "ChanLun-AI-BTC-1h-Analysis"
-  Start-ScheduledTask -TaskName "ChanLun-AI-1h-Evaluate"
   Start-ScheduledTask -TaskName "ChanLun-AI-ETH-1h-Analysis"
+  
+  # 4小时周期
+  Start-ScheduledTask -TaskName "ChanLun-AI-BTC-4h-Analysis"
+  Start-ScheduledTask -TaskName "ChanLun-AI-ETH-4h-Analysis"
   ```
 
 - **删除任务**(如果不再需要自动运行):
   ```powershell
+  # 删除15分钟周期任务
+  Unregister-ScheduledTask -TaskName "ChanLun-AI-BTC-15m-Analysis" -Confirm:$false
+  Unregister-ScheduledTask -TaskName "ChanLun-AI-ETH-15m-Analysis" -Confirm:$false
+  
+  # 删除1小时周期任务
   Unregister-ScheduledTask -TaskName "ChanLun-AI-BTC-1h-Analysis" -Confirm:$false
-  Unregister-ScheduledTask -TaskName "ChanLun-AI-1h-Evaluate" -Confirm:$false
   Unregister-ScheduledTask -TaskName "ChanLun-AI-ETH-1h-Analysis" -Confirm:$false
+  
+  # 删除4小时周期任务
+  Unregister-ScheduledTask -TaskName "ChanLun-AI-BTC-4h-Analysis" -Confirm:$false
+  Unregister-ScheduledTask -TaskName "ChanLun-AI-ETH-4h-Analysis" -Confirm:$false
   ```
 
 > 提示：如果计划任务创建后没有跑起来，可以检查：
@@ -569,6 +825,20 @@ python chanlun_ai.py --help
 | `python stats_visualizer.py` | 生成统计图表 |
 | `python chanlun_visualizer.py BTCUSDT 1h` | 可视化缠论结构 |
 | `python multi_level_analyzer.py BTCUSDT` | 多级别联立分析 |
+
+### AI自我学习工具
+
+| 命令 | 说明 |
+|------|------|
+| `python learning_feedback.py` | AI学习反馈报告 |
+| `python learning_feedback.py --days 60` | 分析最近60天 |
+| `python weight_optimizer.py` | 权重优化分析 |
+| `python weight_optimizer.py --save` | 保存优化后权重 |
+| `python confidence_constraint.py` | 测试置信度约束 |
+| `python learning_visualizer.py` | 生成AI表现仪表盘 |
+| `python learning_visualizer.py --days 60` | 指定时间范围 |
+| `python backtest_validator.py` | 回测验证A/B测试 |
+| `python backtest_validator.py --days 90` | 验证最近90天 |
 
 ### 评估工具
 
