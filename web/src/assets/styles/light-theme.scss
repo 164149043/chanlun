@@ -1,0 +1,111 @@
+// Chanlun Analysis Web - Light Theme Global Styles
+@use './variables.scss' as *;
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #app {
+  width: 100%;
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+body {
+  background-color: $bg-primary;
+  color: $text-primary;
+  overflow: hidden;
+}
+
+// Hand-drawn style button
+.hand-drawn-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: white;
+  border: 2px solid $accent-color;
+  border-radius: $hand-drawn-border;
+  color: $accent-color;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  outline: none;
+
+  &:hover {
+    background: $accent-color;
+    color: white;
+    transform: rotate(-0.5deg) scale(1.02);
+    box-shadow: $shadow-md;
+  }
+
+  &:active {
+    transform: rotate(0.5deg) scale(0.98);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+
+    &:hover {
+      background: white;
+      color: $accent-color;
+    }
+  }
+}
+
+// Legend button
+.legend-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: $bg-secondary;
+  border: 1px solid $border-color;
+  border-radius: 6px;
+  color: $text-secondary;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+
+  &:hover {
+    background: $bg-hover;
+    color: $text-primary;
+  }
+
+  &.active {
+    background: rgba($accent-color, 0.1);
+    border-color: $accent-color;
+    color: $accent-color;
+  }
+
+  .color-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+  }
+}
+
+// Scrollbar
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: $bg-secondary;
+}
+
+::-webkit-scrollbar-thumb {
+  background: $text-secondary;
+  border-radius: 4px;
+
+  &:hover {
+    background: $text-primary;
+  }
+}

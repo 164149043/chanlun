@@ -1,0 +1,55 @@
+// 缠论分析 Web 界面 - 主题变量
+// TradingView 风格浅色主题
+
+// ============ 背景色 ============
+$bg-primary: #FFFFFF;
+$bg-secondary: #F8F9FD;
+$bg-tertiary: #F0F3FA;
+$bg-hover: #F2F3F6;
+
+// ============ 文字色 ============
+$text-primary: #131722;
+$text-secondary: #787B86;
+$text-tertiary: #A0A4A8;
+
+// ============ K线颜色 ============
+$color-up: #089981;      // 涨 - 绿色
+$color-down: #F23645;    // 跌 - 红色
+
+// ============ 缠论元素颜色 ============
+$color-bi-up: #2962FF;      // 向上笔 - 蓝色
+$color-bi-down: #FF6D00;    // 向下笔 - 橙色
+$color-xd: #9C27B0;         // 线段 - 紫色
+$color-zs-bg: rgba(120, 123, 134, 0.15);  // 中枢背景
+$color-zs-border: #787B86;  // 中枢边框
+
+// ============ 分型颜色 ============
+$color-fenxing-ding: #D32F2F;  // 顶分型 - 红色
+$color-fenxing-di: #388E3C;    // 底分型 - 绿色
+
+// ============ 买卖点颜色 ============
+$color-buy1: #089981;   // 1买
+$color-buy2: #26A69A;   // 2买
+$color-buy3: #4DB6AC;   // 3买
+$color-sell1: #F23645;  // 1卖
+$color-sell2: #EF5350;  // 2卖
+$color-sell3: #E57373;  // 3卖
+
+// ============ UI 元素 ============
+$border-color: #E0E3EB;
+$accent-color: #2962FF;
+$shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+$shadow-md: 0 4px 6px rgba(0, 0, 0, 0.07);
+
+// ============ 手绘风格 ============
+$hand-drawn-border: 255px 15px 225px 15px / 15px 225px 15px 255px;
+
+:export {
+  bgPrimary: $bg-primary;
+  bgSecondary: $bg-secondary;
+  textPrimary: $text-primary;
+  textSecondary: $text-secondary;
+  colorUp: $color-up;
+  colorDown: $color-down;
+  accentColor: $accent-color;
+}
