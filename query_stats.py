@@ -268,6 +268,7 @@ def calculate_accuracy():
     by_position_map = {}
     by_signal_map = {}
     by_quality_map = {}
+    by_scoring_mode_map = {}  # 新增：按评分模式统计
     total_score = 0
     total_enhanced_score = 0
     
@@ -354,12 +355,32 @@ def calculate_accuracy():
         stats["score"] += score
         if hit_target:
             stats["hit"] += 1
+
+        # 按评分模式统计（新增）
+        scoring_mode = outcome.get("scoring_mode", "target_based")
+        best_score = outcome.get("best_score", score)
+        stats = by_scoring_mode_map.setdefault(scoring_mode, {"total": 0, "valid": 0, "score": 0})
+        stats["total"] += 1
+        stats["score"] += best_score
+        if best_score >= 0.5:  # 得分>=0.5视为有效
+            stats["valid"] += 1
     
     def build_list(map_data):
         result = []
         for key, stats in map_data.items():
             avg_score = stats["score"] / stats["total"] if stats["total"] > 0 else 0
-            result.append((key, stats["total"], stats["hit"], avg_score))
+            hit = stats.get("hit", 0)
+            result.append((key, stats["total"], hit, avg_score))
+        return result
+
+    def build_scoring_list(map_data):
+        """构建评分模式统计列表（特殊处理，因为有valid字段）"""
+        result = []
+        for key, stats in map_data.items():
+            total = stats["total"]
+            valid = stats.get("valid", 0)
+            avg_score = stats["score"] / total if total > 0 else 0
+            result.append((key, total, valid, avg_score))
         return result
     
     by_direction = build_list(by_direction_map)
@@ -370,6 +391,7 @@ def calculate_accuracy():
     by_signal = build_list(by_signal_map)
     by_quality = build_list(by_quality_map)
     by_outcome = list(by_outcome_map.items())
+    by_scoring_mode = build_scoring_list(by_scoring_mode_map)  # 新增
     
     avg_score = total_score / total if total > 0 else 0
     avg_enhanced_score = total_enhanced_score / total if total > 0 else 0
@@ -389,6 +411,7 @@ def calculate_accuracy():
         "by_position": by_position,
         "by_signal": by_signal,
         "by_quality": by_quality,
+        "by_scoring_mode": by_scoring_mode,  # v2.2 新增
     }
 
 def print_snapshots(limit: int = 10):
@@ -563,7 +586,23 @@ def print_accuracy():
                     "A": "A-优质", "B": "B-良好", "C": "C-一般", "D": "D-低质", "unknown": "未评级"
                 }.get(grade, grade)
                 print(f"  {grade_name:<10} {total_q:<10} {hit_q:<8} {acc_q:>6.1f}%   {avg_score_q:.3f}")
-    
+
+    # 按评分模式统计（v2.2 新增）
+    if stats.get("by_scoring_mode"):
+        print("\n【按评分模式】")
+        print(f"  {'模式':<18} {'样本数':<10} {'有效':<8} {'有效率':<10} {'平均分'}")
+        print("  " + "-" * 55)
+        mode_names = {
+            "target_based": "目标命中",
+            "atr_normalized": "ATR归一化",
+            "signal_expected": "信号期望",
+            "volatility_adjusted": "波动率调整",
+        }
+        for mode, total, valid, avg_score in stats["by_scoring_mode"]:
+            mode_name = mode_names.get(mode, mode)
+            valid_rate = (valid / total * 100) if total > 0 else 0
+            print(f"  {mode_name:<18} {total:<10} {valid:<8} {valid_rate:>6.1f}%   {avg_score:.3f}")
+
     print("\n" + "=" * 70)
     print("  [提示] 详细分析请运行: python stats_enhanced.py")
     print("=" * 70 + "\n")

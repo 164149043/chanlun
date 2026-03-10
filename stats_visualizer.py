@@ -344,6 +344,99 @@ def plot_performance_over_time(records: List[Dict], output_path: str = None):
     return str(output_path)
 
 
+def plot_scoring_mode_comparison(records: List[Dict], output_path: str = None):
+    """绘制评分模式对比图（v2.2 新增）
+
+    对比不同评分模式的有效率和平均得分
+    """
+    if not records:
+        print("No data to plot")
+        return
+
+    # 统计各评分模式
+    mode_stats = {}
+    for rec in records:
+        outcome = rec["outcome"]
+        scoring_mode = outcome.get("scoring_mode", "target_based")
+        best_score = outcome.get("best_score", outcome.get("score", 0))
+
+        if scoring_mode not in mode_stats:
+            mode_stats[scoring_mode] = {"total": 0, "valid": 0, "scores": []}
+
+        mode_stats[scoring_mode]["total"] += 1
+        mode_stats[scoring_mode]["scores"].append(best_score)
+        if best_score >= 0.5:
+            mode_stats[scoring_mode]["valid"] += 1
+
+    if not mode_stats:
+        return
+
+    # 准备数据
+    mode_names_cn = {
+        "target_based": "目标命中",
+        "atr_normalized": "ATR归一化",
+        "signal_expected": "信号期望",
+        "volatility_adjusted": "波动率调整",
+    }
+
+    modes = []
+    valid_rates = []
+    avg_scores = []
+
+    for mode in ["target_based", "atr_normalized", "signal_expected", "volatility_adjusted"]:
+        if mode in mode_stats:
+            stats = mode_stats[mode]
+            modes.append(mode_names_cn.get(mode, mode))
+            valid_rates.append(stats["valid"] / stats["total"] * 100 if stats["total"] > 0 else 0)
+            avg_scores.append(sum(stats["scores"]) / len(stats["scores"]) if stats["scores"] else 0)
+
+    # 创建图表
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle('Scoring Mode Comparison / 评分模式对比', fontsize=14, fontweight='bold')
+
+    # 左图：有效率对比
+    colors1 = ['#3498db', '#2ecc71', '#e74c3c', '#f39c12'][:len(modes)]
+    bars1 = ax1.bar(modes, valid_rates, color=colors1, edgecolor='black', linewidth=0.5)
+    ax1.set_ylabel('Valid Rate (%) / 有效率')
+    ax1.set_title('Valid Rate by Scoring Mode')
+    ax1.set_ylim(0, 100)
+    ax1.axhline(y=50, color='gray', linestyle='--', alpha=0.5)
+
+    for bar, rate in zip(bars1, valid_rates):
+        height = bar.get_height()
+        ax1.annotate(f'{rate:.1f}%',
+                    xy=(bar.get_x() + bar.get_width() / 2, height),
+                    xytext=(0, 3), textcoords="offset points",
+                    ha='center', va='bottom', fontsize=10)
+
+    # 右图：平均得分对比
+    colors2 = ['#3498db', '#2ecc71', '#e74c3c', '#f39c12'][:len(modes)]
+    bars2 = ax2.bar(modes, avg_scores, color=colors2, edgecolor='black', linewidth=0.5)
+    ax2.set_ylabel('Avg Score / 平均分')
+    ax2.set_title('Average Score by Scoring Mode')
+    ax2.set_ylim(0, 1.0)
+    ax2.axhline(y=0.5, color='gray', linestyle='--', alpha=0.5)
+
+    for bar, score in zip(bars2, avg_scores):
+        height = bar.get_height()
+        ax2.annotate(f'{score:.3f}',
+                    xy=(bar.get_x() + bar.get_width() / 2, height),
+                    xytext=(0, 3), textcoords="offset points",
+                    ha='center', va='bottom', fontsize=10)
+
+    plt.tight_layout()
+
+    if output_path is None:
+        OUTPUT_DIR.mkdir(exist_ok=True)
+        output_path = OUTPUT_DIR / "stats_scoring_mode_comparison.png"
+
+    plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='white')
+    plt.close()
+
+    print(f"【完成】评分模式对比图已保存: {output_path}")
+    return str(output_path)
+
+
 def generate_all_charts():
     """生成所有统计图表"""
     
@@ -359,14 +452,15 @@ def generate_all_charts():
             print("  【警告】数据库中暂无评估记录")
             print("  请先运行: python evaluate_outcome.py\n")
             return
-        
+
         print(f"  已找到 {len(records)} 条评估记录\n")
-        
+
         # 生成图表
         plot_win_rate_by_dimension(records)
         plot_score_distribution(records)
         plot_performance_over_time(records)
-        
+        plot_scoring_mode_comparison(records)  # v2.2 新增
+
         print("\n" + "=" * 60)
         print("  【完成】所有图表已生成！")
         print(f"  输出目录: {OUTPUT_DIR}")

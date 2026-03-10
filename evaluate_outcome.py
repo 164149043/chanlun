@@ -27,6 +27,13 @@ from typing import List, Dict, Any
 
 from binance import get_klines
 
+# 导入数据库管理器（修复连接泄漏问题）
+try:
+    from db_manager import get_db_conn, safe_json_loads, safe_json_dumps
+    DB_MANAGER_AVAILABLE = True
+except ImportError:
+    DB_MANAGER_AVAILABLE = False
+
 # ============================================
 # 配置
 # ============================================
@@ -53,36 +60,61 @@ FUTURE_BARS_CONFIG = {
 # 数据库操作
 # ============================================
 
+def get_db_conn():
+    """获取数据库连接（兼容性包装）"""
+    if DB_MANAGER_AVAILABLE:
+        from db_manager import get_db_conn_no_context
+        return get_db_conn_no_context()
+    return sqlite3.connect(str(DB_PATH))
+
+
 def fetch_pending_records(conn) -> List[tuple]:
     """获取待评估的记录（evaluated = 0 且有 ai_json）
-    
+
     返回：
     - List[tuple]: (id, symbol, interval, timestamp, ai_json_str, chanlun_json_str)
     """
-    sql = """
-    SELECT id, symbol, interval, timestamp, ai_json, chanlun_json
-    FROM analysis_snapshot
-    WHERE evaluated = 0 AND ai_json IS NOT NULL
-    """
-    return conn.execute(sql).fetchall()
+    try:
+        sql = """
+        SELECT id, symbol, interval, timestamp, ai_json, chanlun_json
+        FROM analysis_snapshot
+        WHERE evaluated = 0 AND ai_json IS NOT NULL
+        """
+        return conn.execute(sql).fetchall()
+    except sqlite3.Error as e:
+        print(f"数据库查询错误: {e}")
+        return []
 
 
 def mark_as_evaluated(conn, record_id: int, outcome_json: dict):
     """标记记录为已评估
-    
+
     参数：
     - record_id: 快照 ID
     - outcome_json: 评估结果 JSON
     """
-    conn.execute(
-        """
-        UPDATE analysis_snapshot
-        SET outcome_json = ?, evaluated = 1
-        WHERE id = ?
-        """,
-        (json.dumps(outcome_json, ensure_ascii=False), record_id)
-    )
-    conn.commit()
+    try:
+        # 安全的JSON序列化
+        if DB_MANAGER_AVAILABLE:
+            outcome_json_str = safe_json_dumps(outcome_json)
+        else:
+            outcome_json_str = json.dumps(outcome_json, ensure_ascii=False)
+
+        conn.execute(
+            """
+            UPDATE analysis_snapshot
+            SET outcome_json = ?, evaluated = 1
+            WHERE id = ?
+            """,
+            (outcome_json_str, record_id)
+        )
+        conn.commit()
+    except sqlite3.Error as e:
+        print(f"数据库更新错误: {e}")
+        try:
+            conn.rollback()
+        except:
+            pass
 
 
 # ============================================
@@ -186,15 +218,19 @@ def _classify_signal(buy_sell_points: list, divergences: list) -> str:
     return "none"
 
 
+# 滑点容忍度（0.1%）
+SLIPPAGE_PCT = 0.1
+
+
 def evaluate_outcome(ai_json: dict, future_klines: List[Dict[str, Any]], entry_price: float, chanlun_json: dict = None) -> dict:
     """核心评估逻辑（增强版）
-    
+
     参数：
     - ai_json: AI 输出的结构化 JSON
     - future_klines: 未来 K 线列表（至少 10 根）
     - entry_price: 入场价格（分析时的价格）
     - chanlun_json: exporter 导出的完整缠论结构 JSON（可选，用于提取结构上下文）
-    
+
     返回：
     - dict: 评估结果（包含结构上下文）
       {
@@ -207,6 +243,40 @@ def evaluate_outcome(ai_json: dict, future_klines: List[Dict[str, Any]], entry_p
         "structure_context": {...}    # 缠论结构上下文
       }
     """
+    # ========================================
+    # 边界情况检查（新增安全检查）
+    # ========================================
+    # 1. 数据量检查
+    if not future_klines or len(future_klines) < 5:
+        return {
+            "error": "insufficient_klines",
+            "evaluated_bars": len(future_klines) if future_klines else 0,
+            "message": "K线数据不足（至少需要5根）"
+        }
+
+    # 2. 价格异常值检测（波动超过10倍视为异常）
+    closes = [k["close"] for k in future_klines]
+    if max(closes) > 0 and min(closes) > 0:
+        volatility_ratio = max(closes) / min(closes)
+        if volatility_ratio > 10:
+            return {
+                "error": "abnormal_price_movement",
+                "evaluated_bars": len(future_klines),
+                "volatility_ratio": volatility_ratio,
+                "message": f"价格波动异常（{volatility_ratio:.1f}倍）"
+            }
+
+    # 3. 入场价格有效性检查
+    if entry_price <= 0:
+        return {
+            "error": "invalid_entry_price",
+            "evaluated_bars": len(future_klines),
+            "entry_price": entry_price
+        }
+
+    # ========================================
+    # 原有评估逻辑
+    # ========================================
     # 1. 提取 primary_scenario
     primary_scenario = ai_json.get("primary_scenario")
     if not primary_scenario:
@@ -214,45 +284,45 @@ def evaluate_outcome(ai_json: dict, future_klines: List[Dict[str, Any]], entry_p
         scenarios = ai_json.get("scenarios", [])
         if scenarios:
             primary_scenario = next((s for s in scenarios if s.get("rank") == 1), None)
-    
+
     if not primary_scenario:
         return {
             "error": "No primary_scenario found in AI output",
             "evaluated_bars": len(future_klines)
         }
-    
+
     direction = primary_scenario.get("direction", "unknown")
     target_pct = primary_scenario.get("target_pct", 0)
     stop_pct = primary_scenario.get("stop_pct", 0)
-    
-    # 2. 计算未来价格区间
-    if not future_klines:
-        return {
-            "error": "No future klines available",
-            "evaluated_bars": 0
-        }
-    
+
     # 使用 close 价格
     future_closes = [k["close"] for k in future_klines]
     future_highs = [k["high"] for k in future_klines]
     future_lows = [k["low"] for k in future_klines]
-    
+
     max_high = max(future_highs)
     min_low = min(future_lows)
-    
+
     # 3. 计算最大变动幅度
     max_up_move = (max_high - entry_price) / entry_price * 100
     max_down_move = (min_low - entry_price) / entry_price * 100
-    
-    # 4. 判断是否命中目标和止损
+
+    # 4. 判断是否命中目标和止损（添加滑点容忍度）
+    # 滑点容忍度：考虑0.1%的交易成本
     if direction == "up":
-        hit_target = max_up_move >= target_pct
-        hit_stop = max_down_move <= -stop_pct
+        # 多头：需要达到目标扣除滑点后的价格
+        effective_target = max(target_pct * (1 - SLIPPAGE_PCT / 100), 0)
+        effective_stop = stop_pct * (1 + SLIPPAGE_PCT / 100)
+        hit_target = max_up_move >= effective_target
+        hit_stop = max_down_move <= -effective_stop
         max_favorable_move = round(max_up_move, 2)
         max_adverse_move = round(max_down_move, 2)
     elif direction == "down":
-        hit_target = max_down_move <= -target_pct
-        hit_stop = max_up_move >= stop_pct
+        # 空头：需要达到目标扣除滑点后的价格
+        effective_target = max(target_pct * (1 - SLIPPAGE_PCT / 100), 0)
+        effective_stop = stop_pct * (1 + SLIPPAGE_PCT / 100)
+        hit_target = max_down_move <= -effective_target
+        hit_stop = max_up_move >= effective_stop
         max_favorable_move = round(-max_down_move, 2)
         max_adverse_move = round(max_up_move, 2)
     else:
@@ -314,11 +384,11 @@ def evaluate_outcome(ai_json: dict, future_klines: List[Dict[str, Any]], entry_p
     actual_rr = 0
     if max_adverse_move != 0:
         actual_rr = round(abs(max_favorable_move / max_adverse_move), 2)
-    
+
     # 计算预期盈亏比
     expected_rr = round(target_pct / stop_pct, 2) if stop_pct > 0 else 0
-    
-    # 改进评分算法
+
+    # 改进评分算法（传入风险调整参数）
     enhanced_score = _calculate_enhanced_score(
         hit_target=hit_target,
         hit_stop=hit_stop,
@@ -327,10 +397,13 @@ def evaluate_outcome(ai_json: dict, future_klines: List[Dict[str, Any]], entry_p
         max_favorable_move=max_favorable_move,
         target_pct=target_pct,
         hit_target_bar=hit_target_bar,
-        total_bars=len(future_klines)
+        total_bars=len(future_klines),
+        expected_rr=expected_rr,
+        actual_rr=actual_rr
     )
-    
-    return {
+
+    # 构建基础结果
+    result = {
         "direction": direction,
         "target_pct": target_pct,
         "stop_pct": stop_pct,
@@ -353,7 +426,57 @@ def evaluate_outcome(ai_json: dict, future_klines: List[Dict[str, Any]], entry_p
         "actual_rr": actual_rr,
         "expected_rr": expected_rr,
         "structure_context": structure_context,
+        # v2.1 新增：标准字段别名（兼容性）
+        "max_adverse_excursion": max_adverse_move,  # 别名：最大不利变动（MAE）
+        "max_favorable_excursion": max_favorable_move,  # 别名：最大有利变动（MFE）
+        "stop_price": entry_price * (1 - stop_pct/100) if direction == "up" else entry_price * (1 + stop_pct/100),  # 计算的止损价
+        "target_price": entry_price * (1 + target_pct/100) if direction == "up" else entry_price * (1 - target_pct/100),  # 计算的目标价
     }
+
+    # ========================================
+    # 多维度评分（v2.2 新增）
+    # ========================================
+    try:
+        from scoring_engine import ScoringEngine, calculate_atr
+
+        # 计算ATR
+        atr = calculate_atr(future_klines) if future_klines else None
+
+        # 提取信号类型
+        signal_type = structure_context.get("signal_type", "none")
+
+        # 多维度评分
+        scoring_engine = ScoringEngine()
+        all_scores = scoring_engine.calculate_all_scores(
+            outcome=result,
+            signal_type=signal_type,
+            atr=atr,
+            entry_price=entry_price,
+        )
+
+        # 获取最佳评分
+        best_score = scoring_engine.get_best_score(all_scores)
+
+        # 扩展结果
+        result.update({
+            "scoring_mode": best_score.mode,
+            "best_score": best_score.score,
+            "all_scores": {k: v.score for k, v in all_scores.items()},
+            "scoring_details": {k: v.details for k, v in all_scores.items()},
+            "signal_type": signal_type,
+            "atr_at_entry": round(atr, 2) if atr else None,
+        })
+
+    except ImportError:
+        # 向后兼容：如果scoring_engine不可用，使用原有评分
+        result["scoring_mode"] = "target_based"
+        result["best_score"] = result.get("score", 0.0)
+        result["all_scores"] = {"target_based": result.get("score", 0.0)}
+        result["scoring_details"] = {}
+        result["signal_type"] = structure_context.get("signal_type", "none")
+        result["atr_at_entry"] = None
+
+    return result
 
 
 def _calculate_enhanced_score(
@@ -364,27 +487,30 @@ def _calculate_enhanced_score(
     max_favorable_move: float,
     target_pct: float,
     hit_target_bar: int,
-    total_bars: int
+    total_bars: int,
+    expected_rr: float = 0,
+    actual_rr: float = 0,
 ) -> float:
-    """计算增强评分
-    
+    """计算增强评分（改进版：考虑风险调整收益）
+
     评分维度：
-    1. 命中目标 (0.4)
+    1. 命中目标 (0.35)
     2. 方向正确 (0.2)
     3. 最大有利变动占目标比例 (0.2)
-    4. 命中速度 (0.2)
-    
+    4. 命中速度 (0.15)
+    5. 风险调整 (0.1) - 超额完成目标时加分
+
     返回：0.0 ~ 1.0
     """
     score = 0.0
-    
-    # 1. 命中目标（权重 0.4）
+
+    # 1. 命中目标（权重 0.35）
     if hit_target and not hit_stop:
-        score += 0.4
+        score += 0.35
     elif hit_target and hit_stop:
         # 先命中目标再止损，给一半分
         score += 0.2
-    
+
     # 2. 方向正确（权重 0.2）
     if direction == "up" and final_move > 0:
         score += 0.2
@@ -393,19 +519,31 @@ def _calculate_enhanced_score(
     elif direction in ["up", "down"]:
         # 方向错误
         score += 0.0
-    
+
     # 3. 最大有利变动占目标比例（权重 0.2）
     if target_pct > 0:
         ratio = min(max_favorable_move / target_pct, 1.0)
         score += 0.2 * ratio
-    
-    # 4. 命中速度（权重 0.2）
+
+    # 4. 命中速度（权重 0.15）
     if hit_target_bar is not None and total_bars > 0:
         # 越快命中得分越高
         speed_score = 1.0 - (hit_target_bar / total_bars)
-        score += 0.2 * speed_score
-    
-    return round(score, 3)
+        score += 0.15 * speed_score
+
+    # 5. 风险调整（权重 0.1）- 超额完成目标时加分
+    if expected_rr > 0 and actual_rr > 0:
+        if actual_rr > expected_rr * 1.2:
+            # 超额完成20%以上
+            score += 0.1
+        elif actual_rr > expected_rr:
+            # 超额完成
+            score += 0.05
+        elif actual_rr < expected_rr * 0.8:
+            # 严重低于预期
+            score -= 0.05
+
+    return round(min(score, 1.0), 3)
 
 
 # ============================================
@@ -414,107 +552,190 @@ def _calculate_enhanced_score(
 
 def main():
     """主流程"""
-    
+
     print("=" * 60)
     print("📈 缠论 AI 预测结果回填工具（新版）")
     print("=" * 60)
     print()
-    
-    conn = sqlite3.connect(DB_PATH)
-    records = fetch_pending_records(conn)
-    
-    print(f"🔍 待回填记录数: {len(records)}\n")
-    
-    if not records:
-        print("✅ 没有待评估的快照")
-        conn.close()
-        return
-    
-    success_count = 0
-    failed_count = 0
-    
-    for rec in records:
-        record_id, symbol, interval, timestamp_str, ai_json_str, chanlun_json_str = rec
-        
-        print(f"评估快照 #{record_id}: {symbol} @ {interval}")
-        print(f"  分析时间: {timestamp_str}")
-        
-        try:
-            # 1. 解析 AI JSON 和 缠论结构 JSON
-            ai_json = json.loads(ai_json_str)
-            chanlun_json = json.loads(chanlun_json_str) if chanlun_json_str else None
-            
-            # 2. 解析时间戳（ISO 格式）
-            analysis_time = datetime.fromisoformat(timestamp_str)
-            if analysis_time.tzinfo is None:
-                analysis_time = analysis_time.replace(tzinfo=timezone.utc)
-            
-            # 3. 转换为毫秒时间戳
-            start_time_ms = int(analysis_time.timestamp() * 1000)
-            
-            # 4. 标准化交易对格式（BTC/USDT → BTCUSDT）
-            binance_symbol = symbol.replace("/", "")
-            
-            # 5. 根据周期获取需要的 K 线数量
-            future_bars = FUTURE_BARS_CONFIG.get(interval, 50)
-            
-            # 6. 拉取未来 K 线（从分析时间开始）
-            print(f"  ⏳ 拉取未来 {future_bars} 根 K 线...")
-            
-            klines = get_klines(
-                symbol=binance_symbol,
-                interval=interval,
-                limit=future_bars,
-                start_time=start_time_ms
-            )
-            
-            if len(klines) < future_bars:
-                print(f"  ⚠️  K 线数量不足（{len(klines)}/{future_bars}），跳过")
+
+    conn = None
+    try:
+        conn = get_db_conn()
+        records = fetch_pending_records(conn)
+
+        print(f"🔍 待回填记录数: {len(records)}\n")
+
+        if not records:
+            print("✅ 没有待评估的快照")
+            return
+
+        success_count = 0
+        failed_count = 0
+
+        for rec in records:
+            record_id, symbol, interval, timestamp_str, ai_json_str, chanlun_json_str = rec
+
+            print(f"评估快照 #{record_id}: {symbol} @ {interval}")
+            print(f"  分析时间: {timestamp_str}")
+
+            try:
+                # 1. 解析 AI JSON 和 缠论结构 JSON（添加异常处理）
+                try:
+                    if DB_MANAGER_AVAILABLE:
+                        ai_json = safe_json_loads(ai_json_str, {})
+                        chanlun_json = safe_json_loads(chanlun_json_str) if chanlun_json_str else None
+                    else:
+                        ai_json = json.loads(ai_json_str) if ai_json_str else {}
+                        chanlun_json = json.loads(chanlun_json_str) if chanlun_json_str else None
+                except json.JSONDecodeError as e:
+                    print(f"  ✗ JSON解析失败: {e}")
+                    failed_outcome = {
+                        "error": "json_parse_error",
+                        "error_message": f"JSON解析失败: {e}",
+                        "score": 0.0,
+                        "outcome": "failed"
+                    }
+                    mark_as_evaluated(conn, record_id, failed_outcome)
+                    failed_count += 1
+                    continue
+
+                # 2. 解析时间戳（ISO 格式）
+                try:
+                    analysis_time = datetime.fromisoformat(timestamp_str)
+                    if analysis_time.tzinfo is None:
+                        analysis_time = analysis_time.replace(tzinfo=timezone.utc)
+                except ValueError as e:
+                    print(f"  ✗ 时间解析失败: {e}")
+                    failed_count += 1
+                    continue
+
+                # 3. 转换为毫秒时间戳
+                start_time_ms = int(analysis_time.timestamp() * 1000)
+
+                # 4. 标准化交易对格式（BTC/USDT → BTCUSDT）
+                binance_symbol = symbol.replace("/", "")
+
+                # 5. 根据周期获取需要的 K 线数量
+                future_bars = FUTURE_BARS_CONFIG.get(interval, 50)
+
+                # 6. 拉取未来 K 线（从分析时间开始）
+                print(f"  ⏳ 拉取未来 {future_bars} 根 K 线...")
+
+                klines = get_klines(
+                    symbol=binance_symbol,
+                    interval=interval,
+                    limit=future_bars,
+                    start_time=start_time_ms
+                )
+
+                if len(klines) < future_bars:
+                    print(f"  ⚠️  K 线数量不足（{len(klines)}/{future_bars}），记录评估失败")
+                    # 记录评估失败原因（修复：不再跳过，而是记录失败原因）
+                    failed_outcome = {
+                        "error": "insufficient_data",
+                        "error_message": f"K线数量不足（{len(klines)}/{future_bars}）",
+                        "evaluated_bars": len(klines),
+                        "required_bars": future_bars,
+                        "score": 0.0,
+                        "outcome": "failed"
+                    }
+                    mark_as_evaluated(conn, record_id, failed_outcome)
+                    failed_count += 1
+                    continue
+
+                # 7. 获取入场价格（分析时的价格）
+                # 从数据库读取
+                cursor = conn.execute(
+                    "SELECT price FROM analysis_snapshot WHERE id = ?",
+                    (record_id,)
+                )
+                result = cursor.fetchone()
+                if not result:
+                    print(f"  ✗ 无法找到快照价格")
+                    failed_count += 1
+                    continue
+                entry_price = result[0]
+
+                # 8. 评估结果（传入 chanlun_json 以提取结构上下文）
+                outcome = evaluate_outcome(ai_json, klines, entry_price, chanlun_json)
+
+                if "error" in outcome:
+                    print(f"  ✗ 评估失败: {outcome['error']}")
+                    # 即使失败也记录
+                    mark_as_evaluated(conn, record_id, outcome)
+                    failed_count += 1
+                    continue
+
+                # 9. 保存结果
+                mark_as_evaluated(conn, record_id, outcome)
+
+                print(f"  方向: {outcome['direction']}")
+                print(f"  目标: {outcome['target_pct']}% | 止损: {outcome['stop_pct']}%")
+                print(f"  命中目标: {'✓' if outcome['hit_target'] else '✗'}")
+                print(f"  触发止损: {'✓' if outcome['hit_stop'] else '✗'}")
+                print(f"  结果: {outcome['outcome']} (得分: {outcome['score']:.1f})")
+                print(f"  最终变动: {outcome['final_move']}%")
+                print(f"  最大有利: {outcome['max_favorable_move']}%")
+                print(f"  最大不利: {outcome['max_adverse_move']}%")
+
+                # 多维度评分输出（v2.2）
+                if "scoring_mode" in outcome:
+                    signal_type = outcome.get("signal_type", "unknown")
+                    atr = outcome.get("atr_at_entry")
+                    print(f"  信号类型: {signal_type}")
+                    if atr:
+                        print(f"  ATR: {atr}")
+
+                    # 评分对比
+                    all_scores = outcome.get("all_scores", {})
+                    if all_scores:
+                        mode_names = {
+                            "target_based": "目标命中",
+                            "atr_normalized": "ATR归一化",
+                            "signal_expected": "信号期望",
+                            "volatility_adjusted": "波动率调整",
+                        }
+                        print(f"  📊 多维度评分:")
+                        for mode, score in all_scores.items():
+                            mode_name = mode_names.get(mode, mode)
+                            print(f"    {mode_name:>12}: {score:.3f}")
+
+                    best_mode = outcome.get("scoring_mode", "unknown")
+                    best_score = outcome.get("best_score", outcome.get("score", 0))
+                    mode_name_cn = {
+                        "target_based": "目标命中",
+                        "atr_normalized": "ATR归一化",
+                        "signal_expected": "信号期望",
+                        "volatility_adjusted": "波动率调整",
+                    }.get(best_mode, best_mode)
+                    print(f"  最佳评分: {best_score:.3f} ({mode_name_cn})")
+
+                print(f"  ✓ outcome 已回填\n")
+
+                success_count += 1
+
+            except Exception as e:
+                print(f"  ✗ 处理失败: {e}\n")
                 failed_count += 1
+                import traceback
+                traceback.print_exc()
                 continue
-            
-            # 7. 获取入场价格（分析时的价格）
-            # 从数据库读取
-            cursor = conn.execute(
-                "SELECT price FROM analysis_snapshot WHERE id = ?",
-                (record_id,)
-            )
-            entry_price = cursor.fetchone()[0]
-            
-            # 8. 评估结果（传入 chanlun_json 以提取结构上下文）
-            outcome = evaluate_outcome(ai_json, klines, entry_price, chanlun_json)
-            
-            if "error" in outcome:
-                print(f"  ✗ 评估失败: {outcome['error']}")
-                failed_count += 1
-                continue
-            
-            # 9. 保存结果
-            mark_as_evaluated(conn, record_id, outcome)
-            
-            print(f"  方向: {outcome['direction']}")
-            print(f"  目标: {outcome['target_pct']}% | 止损: {outcome['stop_pct']}%")
-            print(f"  命中目标: {'✓' if outcome['hit_target'] else '✗'}")
-            print(f"  触发止损: {'✓' if outcome['hit_stop'] else '✗'}")
-            print(f"  结果: {outcome['outcome']} (得分: {outcome['score']:.1f})")
-            print(f"  最终变动: {outcome['final_move']}%")
-            print(f"  最大有利: {outcome['max_favorable_move']}%")
-            print(f"  最大不利: {outcome['max_adverse_move']}%")
-            print(f"  ✓ outcome 已回填\n")
-            
-            success_count += 1
-            
-        except Exception as e:
-            print(f"  ✗ 处理失败: {e}\n")
-            failed_count += 1
-            import traceback
-            traceback.print_exc()
-            continue
-    
-    conn.close()
-    
-    print("=" * 60)
-    print(f"✅ 评估完成: 成功 {success_count} 条，失败 {failed_count} 条")
+
+        print("=" * 60)
+        print(f"✅ 评估完成: 成功 {success_count} 条，失败 {failed_count} 条")
+
+    except sqlite3.Error as e:
+        print(f"❌ 数据库错误: {e}")
+    except Exception as e:
+        print(f"❌ 未预期的错误: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
 
 
 if __name__ == "__main__":

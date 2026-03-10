@@ -483,7 +483,13 @@ def print_enhanced_report(records: List[Dict]):
         for grade, total, wins, win_rate, avg_score in quality_stats:
             grade_name = grade_names.get(grade, grade)
             print(f"  {grade_name:<10} {total:<10} {wins:<8} {win_rate*100:>6.1f}%   {avg_score:<10.3f}")
-    
+
+    # 评分模式对比（v2.2 新增）
+    print_scoring_mode_comparison(records)
+
+    # 信号 × 评分模式矩阵（v2.2 新增）
+    print_signal_scoring_matrix(records)
+
     print("\n" + "=" * 70)
     print("  【提示】胜率 > 50% 且样本数 >= 10 的组合具有统计意义")
     print("  【提示】信号质量评级 A/B 的胜率应高于 C/D")
@@ -590,6 +596,130 @@ def _get_strength_name_cn(strength: str) -> str:
         "unknown": "未知",
     }
     return names.get(strength, strength)
+
+
+# ============================================
+# v2.2 新增：评分模式相关统计
+# ============================================
+
+def stat_by_scoring_mode(records: List[Dict]) -> List[Tuple]:
+    """按评分模式统计表现（v2.2 新增）"""
+    stats = defaultdict(lambda: {"total": 0, "valid": 0, "score": 0})
+
+    for rec in records:
+        outcome = rec["outcome"]
+        scoring_mode = outcome.get("scoring_mode", "target_based")
+        best_score = outcome.get("best_score", outcome.get("score", 0))
+
+        s = stats[scoring_mode]
+        s["total"] += 1
+        s["score"] += best_score
+        if best_score >= 0.5:  # 得分>=0.5视为有效
+            s["valid"] += 1
+
+    result = []
+    mode_order = ["target_based", "atr_normalized", "signal_expected", "volatility_adjusted"]
+    for mode in mode_order:
+        if mode in stats:
+            s = stats[mode]
+            total = s["total"]
+            valid = s["valid"]
+            avg_score = s["score"] / total if total > 0 else 0
+            result.append((mode, total, valid, avg_score))
+
+    return result
+
+
+def stat_signal_by_scoring_mode(records: List[Dict]) -> Dict[str, Dict]:
+    """信号类型 × 评分模式 组合统计（v2.2 新增）
+
+    返回：
+        Dict: {signal_type: {scoring_mode: {"total": int, "avg_score": float}}}
+    """
+    stats = defaultdict(lambda: defaultdict(lambda: {"total": 0, "score": 0}))
+
+    for rec in records:
+        outcome = rec["outcome"]
+        ctx = get_structure_context(rec)
+        signal_type = ctx.get("signal_type", "unknown")
+        scoring_mode = outcome.get("scoring_mode", "target_based")
+        best_score = outcome.get("best_score", outcome.get("score", 0))
+
+        s = stats[signal_type][scoring_mode]
+        s["total"] += 1
+        # 累计分数，后续计算平均值
+        s["score"] = (s["score"] * (s["total"] - 1) + best_score) / s["total"]
+
+    return dict(stats)
+
+
+def print_scoring_mode_comparison(records: List[Dict]):
+    """打印评分模式对比报表（v2.2 新增）"""
+    scoring_stats = stat_by_scoring_mode(records)
+
+    if not scoring_stats:
+        return
+
+    print("\n【评分模式对比】")
+    print("-" * 70)
+    print(f"  {'模式':<18} {'样本数':<10} {'有效':<8} {'有效率':<10} {'平均分'}")
+    print("  " + "-" * 55)
+
+    mode_names = {
+        "target_based": "目标命中",
+        "atr_normalized": "ATR归一化",
+        "signal_expected": "信号期望",
+        "volatility_adjusted": "波动率调整",
+    }
+
+    for mode, total, valid, avg_score in scoring_stats:
+        mode_name = mode_names.get(mode, mode)
+        valid_rate = (valid / total * 100) if total > 0 else 0
+        print(f"  {mode_name:<18} {total:<10} {valid:<8} {valid_rate:>6.1f}%   {avg_score:.3f}")
+
+
+def print_signal_scoring_matrix(records: List[Dict]):
+    """打印信号 × 评分模式矩阵（v2.2 新增）
+
+    展示不同信号类型在不同评分模式下的表现
+    """
+    matrix = stat_signal_by_scoring_mode(records)
+
+    if not matrix:
+        return
+
+    # 只显示有数据的信号类型
+    signal_types = [sig for sig in sorted(matrix.keys())
+                   if sum(m["total"] for m in matrix[sig].values()) >= 3]  # 至少3个样本
+
+    if not signal_types:
+        return
+
+    print("\n【信号 × 评分模式对比】")
+    print("-" * 70)
+    print(f"  {'信号':<12} {'样本数':<8} {'目标命中':<10} {'ATR归一化':<10} {'信号期望':<10}")
+    print("  " + "-" * 55)
+
+    signal_names = {
+        "1buy": "一买", "2buy": "二买", "3buy": "三买",
+        "1sell": "一卖", "2sell": "二卖", "3sell": "三卖",
+        "bc_buy": "底背驰", "bc_sell": "顶背驰",
+        "mixed": "混合", "none": "无", "unknown": "未知",
+    }
+
+    for sig in signal_types:
+        sig_name = signal_names.get(sig, sig)
+        modes = matrix[sig]
+
+        # 计算总样本数
+        total = sum(m["total"] for m in modes.values())
+
+        # 获取各模式平均分
+        target_score = modes.get("target_based", {}).get("score", 0)
+        atr_score = modes.get("atr_normalized", {}).get("score", 0)
+        signal_score = modes.get("signal_expected", {}).get("score", 0)
+
+        print(f"  {sig_name:<12} {total:<8} {target_score:<10.3f} {atr_score:<10.3f} {signal_score:<10.3f}")
 
 
 # ============================================
