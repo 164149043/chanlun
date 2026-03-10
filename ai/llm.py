@@ -97,9 +97,23 @@ class LLMClient:
         - 若调用失败，将抛出 RuntimeError 并附带简单错误信息，上层可自行捕获处理。
         """
 
+        # 参数验证（修复：添加输入参数检查）
+        if not isinstance(prompt, str):
+            raise TypeError(f"prompt 必须是字符串类型，当前为: {type(prompt)}")
+        if not prompt:
+            raise ValueError("prompt 不能为空")
+
         # 使用传入参数覆盖配置中的默认值
         used_temperature = temperature if temperature is not None else self._config.temperature
         used_max_tokens = max_tokens if max_tokens is not None else self._config.max_tokens
+
+        # 验证 temperature 范围
+        if not isinstance(used_temperature, (int, float)) or used_temperature < 0 or used_temperature > 2:
+            raise ValueError(f"temperature 必须在 [0, 2] 范围内，当前为: {used_temperature}")
+
+        # 验证 max_tokens 范围
+        if not isinstance(used_max_tokens, int) or used_max_tokens < 1:
+            raise ValueError(f"max_tokens 必须是正整数，当前为: {used_max_tokens}")
 
         # 组装 HTTP 请求头
         headers: Dict[str, str] = {
@@ -222,6 +236,7 @@ def call_ai(
             api_key=api_key,
             temperature=temperature,
             max_tokens=max_tokens,
+            timeout=180.0,  # DeepSeek 需要更长超时时间（3分钟），因为模型推理较慢
         )
         client = LLMClient(cfg)
         return client.generate(prompt)
