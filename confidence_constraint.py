@@ -155,16 +155,32 @@ class ConfidenceConstraint:
         
         # 应用调整
         adjusted = (new_prob != orig_prob or new_target != orig_target or new_stop != orig_stop)
-        
+
         if adjusted:
             ai_output["primary_scenario"]["probability"] = round(new_prob, 2)
             ai_output["primary_scenario"]["target_pct"] = round(new_target, 1)
             ai_output["primary_scenario"]["stop_pct"] = round(new_stop, 2)
-            
-            # 同步调整scenarios中的第一个
+
+            # 同步调整scenarios中的第一个（修复：完整同步所有参数）
             scenarios = ai_output.get("scenarios", [])
             if scenarios:
                 scenarios[0]["probability"] = round(new_prob, 2)
+                scenarios[0]["target_pct"] = round(new_target, 1)
+                scenarios[0]["stop_pct"] = round(new_stop, 2)
+                # 如果scenarios[0]有target_range，也需要更新
+                if "target_range" in scenarios[0] and "trigger" in scenarios[0]:
+                    # 根据direction更新target_range
+                    direction = scenarios[0].get("direction", ai_output["primary_scenario"].get("direction"))
+                    entry_price = ai_output.get("meta", {}).get("price", 0)
+                    if entry_price > 0:
+                        if direction == "up":
+                            new_target_high = entry_price * (1 + new_target / 100)
+                            new_target_low = entry_price * (1 + new_target * 0.5 / 100)
+                            scenarios[0]["target_range"] = [round(new_target_low, 0), round(new_target_high, 0)]
+                        elif direction == "down":
+                            new_target_high = entry_price * (1 - new_target * 0.5 / 100)
+                            new_target_low = entry_price * (1 - new_target / 100)
+                            scenarios[0]["target_range"] = [round(new_target_low, 0), round(new_target_high, 0)]
         
         # 生成建议
         if risk_level == "high":

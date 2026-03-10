@@ -40,6 +40,25 @@ from collections import defaultdict
 DB_PATH = Path(__file__).parent / "chanlun_ai.db"
 WEIGHTS_PATH = Path(__file__).parent / "optimized_weights.json"
 
+# 导入数据库管理器（修复连接泄漏问题）
+try:
+    from db_manager import get_db_conn, safe_json_loads
+    DB_MANAGER_AVAILABLE = True
+except ImportError:
+    DB_MANAGER_AVAILABLE = False
+
+
+def get_min_sample_size(total_samples: int) -> int:
+    """动态计算最小样本量阈值"""
+    if total_samples < 50:
+        return 5
+    elif total_samples < 200:
+        return 10
+    elif total_samples < 500:
+        return 15
+    else:
+        return 20
+
 # 默认权重（经验值）
 DEFAULT_WEIGHTS = {
     "signal_type": 20,
@@ -200,18 +219,21 @@ def _classify_signal(buy_sell_points: list, divergences: list) -> str:
     return "mixed"
 
 
-def _get_win_rate(stats_dict: dict, key: str) -> float:
-    """获取历史胜率"""
+def _get_win_rate(stats_dict: dict, key: str, total_samples: int = 0) -> float:
+    """获取历史胜率（动态样本量阈值）"""
     if not stats_dict or key not in stats_dict:
         return 0.5  # 无数据时返回中性值
-    
+
     s = stats_dict[key]
     total = s.get("total", 0)
     wins = s.get("wins", 0)
-    
-    if total < 5:  # 样本太少
+
+    # 动态最小样本量
+    min_size = get_min_sample_size(total_samples)
+
+    if total < min_size:
         return 0.5
-    
+
     return wins / total
 
 
@@ -376,40 +398,43 @@ def score_strength_divergence(strength: str, has_divergence: bool, direction: st
     return round(base_ratio * max_score, 1), "，".join(reason_parts) if reason_parts else "力度正常"
 
 
-def score_history_winrate(signal_type: str, direction: str, max_score: float = None) -> Tuple[float, str]:
+def score_history_winrate(signal_type: str, direction: str, max_score: float = None, total_samples: int = 0) -> Tuple[float, str]:
     """评分：历史胜率
-    
+
     评分逻辑：
     - 基于历史数据的同类信号胜率
     - 组合胜率（信号+方向）权重更高
     """
     if max_score is None:
         max_score = WEIGHTS.get("history", 20)
-    
+
     stats = _load_history_stats()
-    
+
     if not stats:
         return round(0.5 * max_score, 1), "历史数据不足"
-    
+
     # 获取组合胜率
     combo_key = f"{signal_type}_{direction}"
     combo_stats = stats.get("combo", {})
-    combo_wr = _get_win_rate(combo_stats, combo_key)
-    
+    combo_wr = _get_win_rate(combo_stats, combo_key, total_samples)
+
     # 获取信号胜率
     signal_stats = stats.get("signal", {})
-    signal_wr = _get_win_rate(signal_stats, signal_type)
-    
+    signal_wr = _get_win_rate(signal_stats, signal_type, total_samples)
+
     # 加权平均（组合权重60%，信号权重40%）
     avg_wr = combo_wr * 0.6 + signal_wr * 0.4
-    
+
     # 映射到分数（胜率作为比例）
     score = avg_wr * max_score
-    
+
     # 获取样本数
     combo_total = combo_stats.get(combo_key, {}).get("total", 0)
-    
-    if combo_total < 5:
+
+    # 动态最小样本量
+    min_size = get_min_sample_size(total_samples)
+
+    if combo_total < min_size:
         reason = f"样本不足({combo_total}条)，历史胜率参考有限"
     elif avg_wr >= 0.5:
         reason = f"历史胜率{avg_wr*100:.1f}%（{combo_total}条样本），表现良好"

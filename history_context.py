@@ -32,8 +32,54 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 DB_PATH = Path(__file__).parent / "chanlun_ai.db"
+
+# 导入数据库管理器（修复连接泄漏问题）
+try:
+    from db_manager import get_db_conn, safe_json_loads
+    DB_MANAGER_AVAILABLE = True
+except ImportError:
+    DB_MANAGER_AVAILABLE = False
+
+
+def calculate_time_decay(case_timestamp: str, current_timestamp: str = None, half_life_days: int = 30) -> float:
+    """计算时间衰减因子
+
+    使用指数衰减模型，旧案例的权重会随时间降低。
+    默认半衰期为30天，即30天前的案例权重为50%。
+
+    参数:
+        case_timestamp: 案例时间戳（ISO格式）
+        current_timestamp: 当前时间戳（ISO格式，默认为当前时间）
+        half_life_days: 半衰期天数
+
+    返回:
+        float: 衰减因子（0.1 - 1.0）
+    """
+    try:
+        if current_timestamp is None:
+            current_time = datetime.now(timezone.utc)
+        else:
+            current_time = datetime.fromisoformat(current_timestamp)
+            if current_time.tzinfo is None:
+                current_time = current_time.replace(tzinfo=timezone.utc)
+
+        case_time = datetime.fromisoformat(case_timestamp)
+        if case_time.tzinfo is None:
+            case_time = case_time.replace(tzinfo=timezone.utc)
+
+        days_diff = (current_time - case_time).days
+
+        # 指数衰减公式
+        decay = 0.5 ** (days_diff / half_life_days)
+
+        # 最低保留10%权重
+        return max(0.1, min(1.0, decay))
+    except Exception:
+        # 时间解析失败时返回中性值
+        return 1.0
 
 
 @dataclass
@@ -58,13 +104,21 @@ class SimilarCase:
 
 class HistoryContextBuilder:
     """历史上下文构建器"""
-    
+
+    # 默认相似度阈值
+    DEFAULT_SIMILARITY_THRESHOLD = 40
+    MIN_SIMILARITY_THRESHOLD = 20
+
     def __init__(self, db_path: Path = DB_PATH):
         self.db_path = db_path
         self._cache: Dict[str, Any] = {}
-    
+
     def _get_conn(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.db_path)
+        """获取数据库连接"""
+        if DB_MANAGER_AVAILABLE:
+            from db_manager import get_db_conn_no_context
+            return get_db_conn_no_context()
+        return sqlite3.connect(str(self.db_path))
     
     def _classify_signal(self, buy_sell_points: list, divergences: list) -> str:
         """分类信号类型"""
@@ -164,51 +218,73 @@ class HistoryContextBuilder:
         interval: str,
         current_context: Dict[str, str],
         direction: str = None,
-        min_similarity: float = 40,
+        min_similarity: float = None,
         limit: int = 20,
+        enable_time_decay: bool = True,
     ) -> List[SimilarCase]:
-        """检索相似历史案例
-        
+        """检索相似历史案例（支持动态阈值和时间衰减）
+
         参数：
         - symbol: 当前交易对
         - interval: 当前周期
         - current_context: 当前结构上下文（signal_type, trend, position, strength）
         - direction: AI预测方向（可选）
-        - min_similarity: 最小相似度阈值
+        - min_similarity: 最小相似度阈值（None时使用默认值，如果找不到案例会自动降低阈值）
         - limit: 返回数量限制
-        
+        - enable_time_decay: 是否启用时间衰减因子
+
         返回：
         - List[SimilarCase]: 按相似度排序的历史案例
         """
-        conn = self._get_conn()
-        
-        # 查询已评估的历史记录
-        rows = conn.execute("""
-            SELECT 
-                id, symbol, interval, timestamp, 
-                ai_json, outcome_json, chanlun_json
-            FROM analysis_snapshot
-            WHERE evaluated = 1 AND outcome_json IS NOT NULL
-            ORDER BY timestamp DESC
-            LIMIT 500
-        """).fetchall()
-        conn.close()
-        
+        # 动态阈值：如果未指定，使用默认值
+        if min_similarity is None:
+            min_similarity = self.DEFAULT_SIMILARITY_THRESHOLD
+
+        conn = None
+        try:
+            conn = self._get_conn()
+
+            # 查询已评估的历史记录
+            rows = conn.execute("""
+                SELECT
+                    id, symbol, interval, timestamp,
+                    ai_json, outcome_json, chanlun_json
+                FROM analysis_snapshot
+                WHERE evaluated = 1 AND outcome_json IS NOT NULL
+                ORDER BY timestamp DESC
+                LIMIT 500
+            """).fetchall()
+        except sqlite3.Error as e:
+            print(f"数据库查询错误: {e}")
+            return []
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except:
+                    pass
+
         similar_cases = []
-        
+        current_time = datetime.now(timezone.utc).isoformat()
+
         for row in rows:
             snapshot_id, hist_symbol, hist_interval, timestamp, ai_str, outcome_str, chanlun_str = row
-            
+
             try:
-                ai_json = json.loads(ai_str) if ai_str else {}
-                outcome = json.loads(outcome_str)
-                chanlun_json = json.loads(chanlun_str) if chanlun_str else {}
+                if DB_MANAGER_AVAILABLE:
+                    ai_json = safe_json_loads(ai_str, {})
+                    outcome = safe_json_loads(outcome_str, {})
+                    chanlun_json = safe_json_loads(chanlun_str) if chanlun_str else {}
+                else:
+                    ai_json = json.loads(ai_str) if ai_str else {}
+                    outcome = json.loads(outcome_str)
+                    chanlun_json = json.loads(chanlun_str) if chanlun_str else {}
             except Exception:
                 continue
-            
+
             # 提取历史记录的上下文
             hist_context = self._extract_context(chanlun_json, ai_json)
-            
+
             # 计算相似度
             similarity = self._calculate_similarity(
                 current_context,
@@ -216,18 +292,23 @@ class HistoryContextBuilder:
                 symbol_match=(symbol == hist_symbol),
                 interval_match=(interval == hist_interval),
             )
-            
+
             # 如果指定了方向，额外检查方向匹配
             hist_direction = outcome.get("direction", "unknown")
             if direction and direction == hist_direction:
                 similarity += 10  # 方向匹配加分
-            
+
+            # 应用时间衰减因子（修复：旧案例权重降低）
+            if enable_time_decay:
+                time_decay = calculate_time_decay(timestamp, current_time)
+                similarity = similarity * time_decay
+
             if similarity < min_similarity:
                 continue
-            
+
             # 构建相似案例
             primary = ai_json.get("primary_scenario", {})
-            
+
             case = SimilarCase(
                 snapshot_id=snapshot_id,
                 symbol=hist_symbol,
@@ -246,10 +327,22 @@ class HistoryContextBuilder:
                 similarity_score=similarity,
             )
             similar_cases.append(case)
-        
+
         # 按相似度排序
         similar_cases.sort(key=lambda x: x.similarity_score, reverse=True)
-        
+
+        # 动态阈值回退机制：如果找不到足够案例，降低阈值重试
+        if len(similar_cases) < 3 and min_similarity > self.MIN_SIMILARITY_THRESHOLD:
+            return self.search_similar_cases(
+                symbol=symbol,
+                interval=interval,
+                current_context=current_context,
+                direction=direction,
+                min_similarity=max(min_similarity - 10, self.MIN_SIMILARITY_THRESHOLD),
+                limit=limit,
+                enable_time_decay=enable_time_decay,
+            )
+
         return similar_cases[:limit]
     
     def analyze_similar_cases(self, cases: List[SimilarCase]) -> Dict[str, Any]:

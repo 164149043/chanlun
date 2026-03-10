@@ -35,6 +35,35 @@ from datetime import datetime, timedelta
 
 DB_PATH = Path(__file__).parent / "chanlun_ai.db"
 
+# 导入数据库管理器（修复连接泄漏问题）
+try:
+    from db_manager import get_db_conn, safe_json_loads
+    DB_MANAGER_AVAILABLE = True
+except ImportError:
+    DB_MANAGER_AVAILABLE = False
+
+
+def get_min_sample_size(total_samples: int) -> int:
+    """动态计算最小样本量阈值
+
+    根据总样本数动态确定统计是否有意义。
+    样本越多，需要的最小样本量也越大。
+
+    参数:
+        total_samples: 总样本数
+
+    返回:
+        int: 最小样本量阈值
+    """
+    if total_samples < 50:
+        return 5
+    elif total_samples < 200:
+        return 10
+    elif total_samples < 500:
+        return 15
+    else:
+        return 20
+
 
 @dataclass
 class PerformanceStats:
@@ -46,14 +75,17 @@ class PerformanceStats:
     avg_target_pct: float = 0.0
     avg_actual_move: float = 0.0
     target_deviation: float = 0.0  # 目标偏差（目标-实际）
-    
+    total_predictions: int = 0  # 总预测数（用于动态计算最小样本量）
+
     @property
     def win_rate(self) -> float:
         return self.wins / self.total if self.total > 0 else 0
-    
+
     @property
     def has_enough_samples(self) -> bool:
-        return self.total >= 10
+        """动态判断是否有足够样本"""
+        min_size = get_min_sample_size(self.total_predictions)
+        return self.total >= min_size
 
 
 @dataclass
@@ -97,12 +129,16 @@ class LearningReport:
 
 class LearningFeedbackAnalyzer:
     """学习反馈分析器"""
-    
+
     def __init__(self, db_path: Path = DB_PATH):
         self.db_path = db_path
-    
+
     def _get_conn(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.db_path)
+        """获取数据库连接"""
+        if DB_MANAGER_AVAILABLE:
+            from db_manager import get_db_conn_no_context
+            return get_db_conn_no_context()
+        return sqlite3.connect(str(self.db_path))
     
     def _classify_signal(self, ai_json: dict, chanlun_json: dict) -> str:
         """分类信号类型"""

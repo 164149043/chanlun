@@ -110,10 +110,13 @@ class LogicValidator:
         
         # 5. 验证文字分析一致性
         self._validate_analysis_consistency(ai_output)
-        
+
         # 6. 验证结构判断
         self._validate_structure_judgement(ai_output)
-        
+
+        # 7. v2.0 新增：验证状态机格式（如果存在）
+        self._validate_state_machine(ai_output, fixed_output)
+
         # 分类错误
         critical_errors = [e for e in self.errors if e.severity == ErrorSeverity.CRITICAL]
         warnings = [e for e in self.errors if e.severity == ErrorSeverity.WARNING]
@@ -243,12 +246,13 @@ class LogicValidator:
         scenarios = ai_output.get("scenarios", [])
         if not scenarios:
             return
-        
+
         for i, scenario in enumerate(scenarios):
             prob = scenario.get("probability", 0)
             direction = scenario.get("direction", "unknown")
             target_range = scenario.get("target_range", [])
-            
+            entry_range = scenario.get("entry_range", [])
+
             # 检查概率
             if prob <= 0 or prob > 1:
                 self._add_error(
@@ -257,7 +261,7 @@ class LogicValidator:
                     f"scenarios[{i}].probability",
                     "概率应在(0, 1]范围内"
                 )
-            
+
             # 检查目标范围
             if len(target_range) == 2:
                 low, high = target_range
@@ -271,7 +275,7 @@ class LogicValidator:
                     if fixed_output:
                         fixed_output["scenarios"][i]["target_range"] = [high, low]
                         self.errors[-1].auto_fixed = True
-                
+
                 # 检查目标与方向一致性
                 if self.current_price > 0:
                     if direction == "up" and high < self.current_price:
@@ -288,6 +292,109 @@ class LogicValidator:
                             f"scenarios[{i}]",
                             "看跌方向的目标价应低于当前价"
                         )
+
+            # ==================== 新增：入场区间校验 ====================
+            if len(entry_range) == 2 and self.current_price > 0:
+                entry_low, entry_high = entry_range
+
+                # E022: 入场区间顺序检查
+                if entry_low > entry_high:
+                    self._add_error(
+                        "E022", ErrorSeverity.WARNING,
+                        f"场景{i+1}入场区间顺序错误: [{entry_low}, {entry_high}]",
+                        f"scenarios[{i}].entry_range",
+                        "入场区间应该是[低, 高]"
+                    )
+                    if fixed_output:
+                        fixed_output["scenarios"][i]["entry_range"] = [entry_high, entry_low]
+                        entry_low, entry_high = entry_high, entry_low
+                        self.errors[-1].auto_fixed = True
+
+                # 计算入场区间宽度（占当前价格的百分比）
+                entry_range_pct = (entry_high - entry_low) / self.current_price * 100
+
+                # E023: 入场区间过宽检查（不应超过当前价的3%）
+                if entry_range_pct > 3:
+                    self._add_error(
+                        "E023", ErrorSeverity.WARNING,
+                        f"场景{i+1}入场区间过宽: {entry_range_pct:.1f}% (建议不超过3%)",
+                        f"scenarios[{i}].entry_range",
+                        "入场区间过宽会导致交易时机不明确，建议收缩到当前价±1.5%范围内"
+                    )
+                    # 自动修复：收缩入场区间到当前价附近
+                    if fixed_output:
+                        # 根据方向调整入场区间
+                        if direction == "up":
+                            # 做多：入场区在当前价附近或略下方
+                            new_entry_low = self.current_price * 0.985
+                            new_entry_high = self.current_price * 1.005
+                        elif direction == "down":
+                            # 做空：入场区在当前价附近或略上方
+                            new_entry_low = self.current_price * 0.995
+                            new_entry_high = self.current_price * 1.015
+                        else:  # range
+                            # 震荡：在当前价两侧
+                            new_entry_low = self.current_price * 0.99
+                            new_entry_high = self.current_price * 1.01
+                        fixed_output["scenarios"][i]["entry_range"] = [new_entry_low, new_entry_high]
+                        self.errors[-1].auto_fixed = True
+
+                # E024: 入场区间与方向一致性检查
+                if direction == "up":
+                    # 做多：入场区应在当前价附近或略下方，不应偏离太多
+                    if entry_low > self.current_price * 1.02:
+                        self._add_error(
+                            "E024", ErrorSeverity.WARNING,
+                            f"场景{i+1}做多入场区过高: 入场下限{entry_low:.0f} > 当前价{self.current_price:.0f}的102%",
+                            f"scenarios[{i}].entry_range",
+                            "做多时入场区应在当前价附近或略下方"
+                        )
+                        if fixed_output:
+                            fixed_output["scenarios"][i]["entry_range"] = [
+                                self.current_price * 0.985,
+                                self.current_price * 1.005
+                            ]
+                            self.errors[-1].auto_fixed = True
+                elif direction == "down":
+                    # 做空：入场区应在当前价附近或略上方
+                    if entry_high < self.current_price * 0.98:
+                        self._add_error(
+                            "E025", ErrorSeverity.WARNING,
+                            f"场景{i+1}做空入场区过低: 入场上限{entry_high:.0f} < 当前价{self.current_price:.0f}的98%",
+                            f"scenarios[{i}].entry_range",
+                            "做空时入场区应在当前价附近或略上方"
+                        )
+                        if fixed_output:
+                            fixed_output["scenarios"][i]["entry_range"] = [
+                                self.current_price * 0.995,
+                                self.current_price * 1.015
+                            ]
+                            self.errors[-1].auto_fixed = True
+
+                # E026: 止损与入场区间逻辑检查
+                # 从 target_range 推断止损位置
+                if len(target_range) == 2:
+                    if direction == "up":
+                        # 做多：止损应在入场区下方
+                        # 通常止损设在 target_range 下界或更低
+                        stop_price = target_range[0]  # 做多的止损在目标下界
+                        if stop_price > entry_low:
+                            self._add_error(
+                                "E026", ErrorSeverity.CRITICAL,
+                                f"场景{i+1}做多止损逻辑错误: 止损{stop_price:.0f} > 入场区下限{entry_low:.0f}",
+                                f"scenarios[{i}].target_range",
+                                "做多时止损应低于入场价格"
+                            )
+                    elif direction == "down":
+                        # 做空：止损应在入场区上方
+                        stop_price = target_range[1]  # 做空的止损在目标上界
+                        if stop_price < entry_high:
+                            self._add_error(
+                                "E026", ErrorSeverity.CRITICAL,
+                                f"场景{i+1}做空止损逻辑错误: 止损{stop_price:.0f} < 入场区上限{entry_high:.0f}",
+                                f"scenarios[{i}].target_range",
+                                "做空时止损应高于入场价格"
+                            )
     
     def _validate_signal_consistency(self, ai_output: Dict, chanlun_json: Dict = None):
         """验证方向与信号一致性"""
@@ -447,6 +554,128 @@ class LogicValidator:
                 "中枢高点(ZG)应大于等于中枢低点(ZD)"
             )
 
+    def _validate_state_machine(self, ai_output: Dict, fixed_output: Dict = None):
+        """验证状态机格式（v2.0 新增）
+
+        检查项：
+        1. active_strategy 必须唯一
+        2. entry_gate.price_zone 宽度不超过 3%
+        3. structure_required 不能为空
+        4. invalidation 条件必须存在
+        5. 风险等级与历史胜率匹配
+        """
+        state_machine = ai_output.get("state_machine", {})
+        if not state_machine:
+            return  # 状态机是可选的
+
+        current_state = state_machine.get("current_state", "")
+        active_strategy = state_machine.get("active_strategy", {})
+
+        # E027: 检查状态值是否有效
+        if current_state not in ["STRATEGY_ACTIVE", "WAIT_CONFIRMATION", "OBSERVE_ONLY"]:
+            self._add_error(
+                "E027", ErrorSeverity.WARNING,
+                f"无效的当前状态: {current_state}",
+                "state_machine.current_state",
+                "状态必须是 STRATEGY_ACTIVE / WAIT_CONFIRMATION / OBSERVE_ONLY 之一"
+            )
+
+        # 如果是 OBSERVE_ONLY，不需要进一步验证
+        if current_state == "OBSERVE_ONLY" or not active_strategy:
+            return
+
+        # 验证 active_strategy
+        direction = active_strategy.get("direction", "")
+        if direction not in ["up", "down"]:
+            self._add_error(
+                "E028", ErrorSeverity.CRITICAL,
+                f"激活策略方向无效: {direction}",
+                "state_machine.active_strategy.direction",
+                "方向必须是 up 或 down"
+            )
+
+        # 验证 entry_gate
+        entry_gate = active_strategy.get("entry_gate", {})
+        price_zone = entry_gate.get("price_zone", [])
+        structure_required = entry_gate.get("structure_required", [])
+
+        # E029: 入场区间宽度检查
+        if len(price_zone) == 2 and self.current_price > 0:
+            low, high = price_zone
+            if low > high:
+                self._add_error(
+                    "E029", ErrorSeverity.WARNING,
+                    f"激活策略入场区间顺序错误: [{low}, {high}]",
+                    "state_machine.active_strategy.entry_gate.price_zone",
+                    "入场区间应该是 [低, 高]"
+                )
+                if fixed_output:
+                    fixed_output["state_machine"]["active_strategy"]["entry_gate"]["price_zone"] = [high, low]
+                    self.errors[-1].auto_fixed = True
+            else:
+                zone_width_pct = (high - low) / self.current_price * 100
+                if zone_width_pct > 3:
+                    self._add_error(
+                        "E030", ErrorSeverity.WARNING,
+                        f"激活策略入场区间过宽: {zone_width_pct:.1f}% (建议不超过3%)",
+                        "state_machine.active_strategy.entry_gate.price_zone",
+                        "入场区间过宽会导致交易时机不明确"
+                    )
+
+        # E031: 结构触发条件不能为空
+        if not structure_required or len(structure_required) == 0:
+            self._add_error(
+                "E031", ErrorSeverity.CRITICAL,
+                "激活策略缺少结构触发条件",
+                "state_machine.active_strategy.entry_gate.structure_required",
+                "entry_gate.structure_required 不能为空，必须包含具体的缠论术语条件"
+            )
+
+        # 验证 invalidation 条件
+        invalidation = state_machine.get("invalidation", {})
+        invalidate_if = invalidation.get("invalidate_active_if", [])
+
+        # E032: 必须有否决条件
+        if not invalidate_if or len(invalidate_if) == 0:
+            self._add_error(
+                "E032", ErrorSeverity.CRITICAL,
+                "状态机缺少否决条件",
+                "state_machine.invalidation",
+                "必须定义 invalidation 条件（什么情况下放弃当前策略）"
+            )
+
+        # 验证执行参数
+        execution = active_strategy.get("execution", {})
+        stop_loss = execution.get("stop_loss", 0)
+        target = execution.get("target", 0)
+
+        # E033: 止损和目标必须存在
+        if stop_loss == 0:
+            self._add_error(
+                "E033", ErrorSeverity.CRITICAL,
+                "激活策略缺少止损价格",
+                "state_machine.active_strategy.execution.stop_loss",
+                "execution.stop_loss 必须大于 0"
+            )
+
+        if target == 0:
+            self._add_error(
+                "E034", ErrorSeverity.CRITICAL,
+                "激活策略缺少目标价格",
+                "state_machine.active_strategy.execution.target",
+                "execution.target 必须大于 0"
+            )
+
+        # E035: 盈亏比检查
+        rr = execution.get("rr", 0)
+        if rr > 0 and rr < 0.8:
+            self._add_error(
+                "E035", ErrorSeverity.WARNING,
+                f"激活策略盈亏比过低: {rr:.2f}:1 (建议至少 1:1)",
+                "state_machine.active_strategy.execution.rr",
+                "盈亏比过低可能导致风险收益不合理"
+            )
+
 
 def validate_ai_output(
     ai_output: Dict[str, Any],
@@ -514,7 +743,43 @@ def format_validation_report(result: ValidationResult) -> str:
             lines.append(f"  [{info.code}] {info.message}")
     
     lines.append("\n" + "=" * 60)
-    
+
+    return "\n".join(lines)
+
+
+def format_entry_range_fixes(result: ValidationResult, current_price: float) -> str:
+    """格式化入场区间修复摘要（用于 chanlun_ai.py 显示）
+
+    参数：
+    - result: 验证结果
+    - current_price: 当前价格
+
+    返回：
+    - 格式化的修复摘要
+    """
+    if not result.warnings and not result.errors:
+        return ""
+
+    # 筛选出入场区间相关的修复
+    entry_fixes = []
+    for err in result.errors + result.warnings:
+        if err.auto_fixed and "entry_range" in err.field and err.code in ["E022", "E023", "E024", "E025"]:
+            entry_fixes.append(err)
+
+    if not entry_fixes:
+        return ""
+
+    lines = ["\n📋 入场区间优化："]
+    for err in entry_fixes[:3]:  # 最多显示3条
+        if err.code == "E023":
+            lines.append(f"  - 入场区间过宽已收缩至当前价±1.5%")
+        elif err.code == "E024":
+            lines.append(f"  - 做多入场区调整至当前价附近")
+        elif err.code == "E025":
+            lines.append(f"  - 做空入场区调整至当前价附近")
+        elif err.code == "E022":
+            lines.append(f"  - 入场区间顺序已修正")
+
     return "\n".join(lines)
 
 
