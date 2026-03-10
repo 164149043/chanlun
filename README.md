@@ -206,6 +206,42 @@ python chanlun_visualizer.py BTCUSDT 1h --limit 500
 python multi_level_analyzer.py BTCUSDT --save
 ```
 
+### Web 界面（实时交互式分析）
+
+项目提供了基于 Vue 3 + ECharts 的 Web 界面，支持实时交互式分析：
+
+**快速启动**：
+```bash
+# Windows
+start_web.bat
+
+# Linux/Mac
+./start_web.sh
+```
+
+**手动启动**：
+```bash
+# 1. 启动后端 API 服务
+python api/server.py
+
+# 2. 启动前端开发服务器
+cd web
+npm install  # 首次运行
+npm run dev
+```
+
+**访问地址**：
+- 前端界面：http://localhost:5173
+- 后端 API：http://127.0.0.1:8001
+
+**Web 界面功能**：
+- 实时 K 线图 + 缠论结构叠加显示
+- 支持多周期切换（15M / 1H / 4H / 1D）
+- 支持多交易对切换（BTC/USDT、ETH/USDT）
+- 图层控制（笔/线段/中枢/买卖点）
+- AI 分析侧边栏
+- 手绘风格 UI 元素
+
 ### 回填预测结果
 
 ```bash
@@ -315,6 +351,21 @@ chanlun/
 │   ├── chanlun_visualizer.py  # 缠论结构可视化工具
 │   ├── multi_level_analyzer.py # 多级别联立分析工具
 │   └── stats_report.py        # 研究报告生成器（AI × 缠论结构统计）
+│
+├── Web 服务模块
+│   ├── api/                      # 后端 API 服务
+│   │   ├── server.py            # FastAPI 主服务
+│   │   ├── analyze_service.py   # 分析服务
+│   │   └── analyze_streaming.py # 流式分析服务
+│   │
+│   ├── web/                      # 前端 Web 界面（Vue 3 + TypeScript）
+│   │   ├── src/                 # 源代码
+│   │   ├── index.html           # 入口 HTML
+│   │   ├── vite.config.ts       # Vite 配置
+│   │   └── package.json         # 项目配置
+│   │
+│   ├── start_web.bat            # Windows 启动脚本
+│   └── start_web.sh             # Linux/Mac 启动脚本
 │
 ├── AI自我学习模块
 │   ├── history_context.py        # 相似案例检索 + Prompt注入

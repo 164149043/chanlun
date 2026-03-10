@@ -24,6 +24,7 @@ wheels/
 venv/
 ENV/
 env/
+.venv/
 
 # IDE
 .vscode/
@@ -31,6 +32,7 @@ env/
 *.swp
 *.swo
 *~
+.claude/
 
 # 环境变量文件（包含敏感信息）
 .env
@@ -51,3 +53,34 @@ config.yaml
 # 操作系统
 .DS_Store
 Thumbs.db
+
+# Node.js / Web
+node_modules/
+web/dist/
+web/node_modules/
+*.tsbuildinfo
+
+# 临时文件和笔记（中文命名）
+--structured*
+--table*
+AI分析输出
+chatgpt给出的提示
+tradingview*
+开始分析进度条实例代码
+chanlun显示
+web前端结构*
+缠论买卖点和背驰规则/
+
+# Lock 文件（可选，通常需要提交 package-lock.json）
+# package-lock.json
+
+# 测试输出
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# 优化后的权重文件（运行时生成）
+optimized_weights.json
