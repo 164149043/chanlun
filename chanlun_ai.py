@@ -49,6 +49,13 @@ from output_formatter import format_cli_output
 from ai.llm import call_ai
 from ai_output_schema import validate_ai_output
 
+# 导入数据库管理器（修复连接泄漏问题）
+try:
+    from db_manager import get_db_conn, get_db_path, safe_json_loads, safe_json_dumps
+    DB_MANAGER_AVAILABLE = True
+except ImportError:
+    DB_MANAGER_AVAILABLE = False
+
 # 导入统计模块
 try:
     from query_stats import calculate_accuracy, print_accuracy
@@ -91,94 +98,136 @@ except ImportError:
 # 数据库功能（SQLite）
 # ============================================
 
-DB_PATH = Path(__file__).parent / "chanlun_ai.db"
+# 获取数据库路径
+if DB_MANAGER_AVAILABLE:
+    DB_PATH = get_db_path()
+else:
+    DB_PATH = Path(__file__).parent / "chanlun_ai.db"
 
 
 def get_db_conn():
-    """获取数据库连接"""
+    """获取数据库连接（兼容性包装）"""
+    if DB_MANAGER_AVAILABLE:
+        from db_manager import get_db_conn_no_context
+        return get_db_conn_no_context()
     return sqlite3.connect(DB_PATH)
 
 
 def init_db():
     """初始化数据库表结构（首次运行时自动创建）"""
+    if DB_MANAGER_AVAILABLE:
+        from db_manager import init_db as db_init
+        db_init()
+        return
+
+    # 兼容性代码（当db_manager不可用时）
     conn = get_db_conn()
-    c = conn.cursor()
+    try:
+        c = conn.cursor()
 
-    # 表 1: analysis_snapshot（分析快照）
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS analysis_snapshot (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        symbol TEXT NOT NULL,
-        interval TEXT NOT NULL,
-        timestamp TEXT NOT NULL,
-        price REAL NOT NULL,
-        chanlun_json TEXT NOT NULL,
-        ai_json TEXT,
-        created_at TEXT NOT NULL,
-        evaluated INTEGER DEFAULT 0,
-        outcome_json TEXT
-    )
-    """)
+        # 表 1: analysis_snapshot（分析快照）
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS analysis_snapshot (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL,
+            interval TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            price REAL NOT NULL,
+            chanlun_json TEXT NOT NULL,
+            ai_json TEXT,
+            created_at TEXT NOT NULL,
+            evaluated INTEGER DEFAULT 0,
+            outcome_json TEXT
+        )
+        """)
 
-    # 表 2: analysis_outcome（未来结果回填）
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS analysis_outcome (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        snapshot_id INTEGER NOT NULL,
-        check_after_minutes INTEGER NOT NULL,
-        future_price REAL NOT NULL,
-        max_price REAL NOT NULL,
-        min_price REAL NOT NULL,
-        result_direction TEXT NOT NULL,
-        hit_scenario_rank INTEGER,
-        note TEXT,
-        checked_at TEXT NOT NULL,
-        FOREIGN KEY(snapshot_id) REFERENCES analysis_snapshot(id)
-    )
-    """)
+        # 表 2: analysis_outcome（未来结果回填）
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS analysis_outcome (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_id INTEGER NOT NULL,
+            check_after_minutes INTEGER NOT NULL,
+            future_price REAL NOT NULL,
+            max_price REAL NOT NULL,
+            min_price REAL NOT NULL,
+            result_direction TEXT NOT NULL,
+            hit_scenario_rank INTEGER,
+            note TEXT,
+            checked_at TEXT NOT NULL,
+            FOREIGN KEY(snapshot_id) REFERENCES analysis_snapshot(id)
+        )
+        """)
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def save_snapshot(symbol: str, interval: str, price: float, chanlun_json: dict, ai_json: dict = None):
     """保存一次分析快照到数据库
-    
+
     参数：
     - symbol: 交易对（如 BTC/USDT）
     - interval: 周期（如 1h）
     - price: 当前价格
     - chanlun_json: 完整的缠论结构 JSON（exporter 导出的）
     - ai_json: AI 输出的 JSON（如果有结构化输出）
-    
+
     返回：
-    - snapshot_id: 插入的记录 ID
+    - snapshot_id: 插入的记录 ID，失败时返回 None
     """
-    conn = get_db_conn()
-    c = conn.cursor()
-    # 使用 UTC 时间（与 Binance API 保持一致）
-    from datetime import timezone
-    now = datetime.now(timezone.utc).isoformat()
+    conn = None
+    try:
+        conn = get_db_conn()
+        c = conn.cursor()
+        # 使用 UTC 时间（与 Binance API 保持一致）
+        from datetime import timezone
+        now = datetime.now(timezone.utc).isoformat()
 
-    c.execute("""
-        INSERT INTO analysis_snapshot
-        (symbol, interval, timestamp, price, chanlun_json, ai_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (
-        symbol,
-        interval,
-        now,
-        float(price),
-        json.dumps(chanlun_json, ensure_ascii=False),
-        json.dumps(ai_json, ensure_ascii=False) if ai_json else None,
-        now,
-    ))
+        # 安全的JSON序列化
+        chanlun_json_str = safe_json_dumps(chanlun_json) if DB_MANAGER_AVAILABLE else json.dumps(chanlun_json, ensure_ascii=False)
+        ai_json_str = safe_json_dumps(ai_json) if (ai_json and DB_MANAGER_AVAILABLE) else (json.dumps(ai_json, ensure_ascii=False) if ai_json else None)
 
-    snapshot_id = c.lastrowid
-    conn.commit()
-    conn.close()
+        c.execute("""
+            INSERT INTO analysis_snapshot
+            (symbol, interval, timestamp, price, chanlun_json, ai_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            symbol,
+            interval,
+            now,
+            float(price),
+            chanlun_json_str,
+            ai_json_str,
+            now,
+        ))
 
-    return snapshot_id
+        snapshot_id = c.lastrowid
+        conn.commit()
+        return snapshot_id
+
+    except sqlite3.Error as e:
+        print(f"数据库错误: {e}")
+        if conn:
+            try:
+                conn.rollback()
+            except:
+                pass
+        return None
+    except Exception as e:
+        print(f"保存快照失败: {e}")
+        if conn:
+            try:
+                conn.rollback()
+            except:
+                pass
+        return None
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
 
 
 def judge_hit(ai_json: dict, max_price: float, min_price: float):
@@ -222,7 +271,7 @@ def save_outcome(
     note: str = "",
 ):
     """保存一次结果回填记录
-    
+
     参数：
     - snapshot_id: 对应的快照 ID
     - check_after_minutes: 检查时间（60/240/1440 分钟后）
@@ -233,31 +282,52 @@ def save_outcome(
     - hit_scenario_rank: 命中的 scenario rank
     - note: 备注信息
     """
-    conn = get_db_conn()
-    c = conn.cursor()
-    # 使用 UTC 时间（与 Binance API 保持一致）
-    from datetime import timezone
-    now = datetime.now(timezone.utc).isoformat()
+    conn = None
+    try:
+        conn = get_db_conn()
+        c = conn.cursor()
+        # 使用 UTC 时间（与 Binance API 保持一致）
+        from datetime import timezone
+        now = datetime.now(timezone.utc).isoformat()
 
-    c.execute("""
-        INSERT INTO analysis_outcome
-        (snapshot_id, check_after_minutes, future_price, max_price, min_price,
-         result_direction, hit_scenario_rank, note, checked_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        int(snapshot_id),
-        int(check_after_minutes),
-        float(future_price),
-        float(max_price),
-        float(min_price),
-        result_direction,
-        hit_scenario_rank,
-        note,
-        now,
-    ))
+        c.execute("""
+            INSERT INTO analysis_outcome
+            (snapshot_id, check_after_minutes, future_price, max_price, min_price,
+             result_direction, hit_scenario_rank, note, checked_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            int(snapshot_id),
+            int(check_after_minutes),
+            float(future_price),
+            float(max_price),
+            float(min_price),
+            result_direction,
+            hit_scenario_rank,
+            note,
+            now,
+        ))
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+    except sqlite3.Error as e:
+        print(f"数据库错误: {e}")
+        if conn:
+            try:
+                conn.rollback()
+            except:
+                pass
+    except Exception as e:
+        print(f"保存结果失败: {e}")
+        if conn:
+            try:
+                conn.rollback()
+            except:
+                pass
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
 
 
 # ============================================
@@ -660,9 +730,14 @@ def main():
                 if clean_result.endswith("```"):
                     clean_result = clean_result[:-3]
                 clean_result = clean_result.strip()
-                    
-                # 解析 JSON
-                structured_output = json.loads(clean_result)
+
+                # 解析 JSON（添加异常处理）
+                try:
+                    structured_output = json.loads(clean_result)
+                except json.JSONDecodeError as e:
+                    print(f"   ✗ JSON 解析失败: {e}")
+                    print(f"   原始内容: {clean_result[:200]}...")
+                    structured_output = None
                     
                 # 验证 Schema
                 validated_output = validate_ai_output(structured_output)
@@ -707,7 +782,7 @@ def main():
                             current_price=latest_price,
                             auto_fix=True,
                         )
-                        
+
                         if logic_result.has_critical_errors:
                             print(f"   ⚠️  发现 {len(logic_result.errors)} 个严重逻辑错误")
                             for err in logic_result.errors:
@@ -720,7 +795,13 @@ def main():
                             print(f"   ⚠️  发现 {len(logic_result.warnings)} 个逻辑警告")
                         else:
                             print("   ✓ 逻辑验证通过")
-                        
+
+                        # 显示入场区间优化信息
+                        from logic_validator import format_entry_range_fixes
+                        entry_fix_msg = format_entry_range_fixes(logic_result, latest_price)
+                        if entry_fix_msg:
+                            print(entry_fix_msg)
+
                         # 将逻辑验证结果添加到输出
                         validated_output["logic_validation"] = {
                             "is_valid": logic_result.is_valid,
@@ -779,7 +860,89 @@ def main():
                     }
                 except Exception as qe:
                     print(f"   ⚠️  信号质量评分计算失败: {qe}")
-                
+
+                # ⭐ v2.0 新增：状态机转换（自动生成状态机格式）
+                try:
+                    from state_machine_converter import scenarios_to_state_machine, format_state_machine_for_display
+
+                    # 获取历史胜率（用于确定风险等级）
+                    hist_winrate = stats_summary.get("accuracy", 0) if stats_summary else None
+
+                    # 转换为状态机格式
+                    state_machine = scenarios_to_state_machine(
+                        validated_output,
+                        latest_price,
+                        historical_winrate=hist_winrate
+                    )
+                    validated_output["state_machine"] = state_machine
+                    validated_output["output_mode"] = "state_machine"
+                    validated_output["version"] = "2.0"
+
+                    print(f"   🔄 已生成状态机格式: {state_machine.get('current_state', 'UNKNOWN')}")
+                except Exception as sm_err:
+                    print(f"   ⚠️  状态机转换失败: {sm_err}")
+
+                # ⭐ v2.1 新增：规则引擎（结构优先原则）
+                try:
+                    from rule_engine import apply_rule_engine
+
+                    # 应用规则引擎约束 AI 概率分配
+                    success, rule_result = apply_rule_engine(
+                        ai_json=ai_json,
+                        ai_output=validated_output,
+                        latest_price=latest_price,
+                        enable_ai_adjustment=True  # 允许 AI 在 ±10% 范围内微调
+                    )
+
+                    if success and rule_result:
+                        # 更新 scenarios 中的概率
+                        scenarios = validated_output.get("scenarios", [])
+                        if scenarios:
+                            # 按方向更新概率
+                            for scenario in scenarios:
+                                direction = scenario.get("direction", "")
+                                if direction == "up":
+                                    scenario["probability"] = rule_result.ai_adjusted_probabilities["up"]
+                                elif direction == "down":
+                                    scenario["probability"] = rule_result.ai_adjusted_probabilities["down"]
+                                elif direction == "range":
+                                    scenario["probability"] = rule_result.ai_adjusted_probabilities["range"]
+
+                            # 更新 primary_scenario 方向和概率
+                            primary = validated_output.get("primary_scenario", {})
+                            primary["direction"] = rule_result.primary_direction
+                            primary["probability"] = max(rule_result.ai_adjusted_probabilities.values())
+
+                        # 保存规则引擎结果
+                        validated_output["rule_engine_result"] = {
+                            "base_probabilities": rule_result.base_probabilities,
+                            "ai_adjusted_probabilities": rule_result.ai_adjusted_probabilities,
+                            "primary_direction": rule_result.primary_direction,
+                            "confidence_level": rule_result.confidence_level,
+                            "applied_rules": rule_result.applied_rules,
+                            "warnings": rule_result.warnings
+                        }
+
+                        # 输出规则引擎处理信息
+                        print(f"   📐 规则引擎已应用 {len(rule_result.applied_rules)} 条规则")
+                        print(f"      基准概率: up={rule_result.base_probabilities['up']:.0%} "
+                              f"down={rule_result.base_probabilities['down']:.0%} "
+                              f"range={rule_result.base_probabilities['range']:.0%}")
+                        print(f"      调整后概率: up={rule_result.ai_adjusted_probabilities['up']:.0%} "
+                              f"down={rule_result.ai_adjusted_probabilities['down']:.0%} "
+                              f"range={rule_result.ai_adjusted_probabilities['range']:.0%}")
+                        print(f"      主推方向: {rule_result.primary_direction}")
+                        print(f"      置信度: {rule_result.confidence_level}")
+                        if rule_result.warnings:
+                            for w in rule_result.warnings:
+                                print(f"      ⚠️  {w}")
+
+                except ImportError:
+                    # 规则引擎模块不可用，跳过
+                    pass
+                except Exception as re_err:
+                    print(f"   ⚠️  规则引擎处理失败: {re_err}")
+
                 # ⭐ 保存分析快照到数据库（AI 输出验证通过后）
                 try:
                     snapshot_id = save_snapshot(
@@ -796,53 +959,134 @@ def main():
                 print("\n" + "=" * 60)
                 print("【AI 结构化分析结果】")
                 print("=" * 60)
-                
-                # 1. 优先显示文字分析（如果有）
-                analysis_text = validated_output.get("analysis")
-                if analysis_text:
-                    print("\n" + "=" * 60)
-                    print("📝 AI 市场分析（给交易者看的解读）")
-                    print("=" * 60)
-                    # 按句号分段显示，提高可读性
-                    paragraphs = analysis_text.split("。")
-                    for para in paragraphs:
-                        if para.strip():
-                            print(f"  {para.strip()}。")
-                    print("=" * 60 + "\n")
-                
-                # 1.5. 显示策略概率（从 scenarios 中提取）
-                scenarios = validated_output.get("scenarios", [])
-                if scenarios:
-                    print("📊 策略概率分布：")
-                    print("-" * 60)
-                    
-                    # 按方向分组统计概率
-                    prob_map = {"up": 0.0, "down": 0.0, "range": 0.0}
-                    for scenario in scenarios:
-                        direction = scenario.get("direction", "")
-                        prob = scenario.get("probability", 0)
-                        if direction in prob_map:
-                            prob_map[direction] += prob
-                    
-                    # 显示各方向概率
-                    if prob_map["up"] > 0:
-                        print(f"  📈 做多策略概率: {prob_map['up'] * 100:.1f}%")
-                    if prob_map["down"] > 0:
-                        print(f"  📉 做空策略概率: {prob_map['down'] * 100:.1f}%")
-                    if prob_map["range"] > 0:
-                        print(f"  ↔️  震荡策略概率: {prob_map['range'] * 100:.1f}%")
-                    
-                    print("-" * 60 + "\n")
-                
-                # 2. 显示关键预测信息（精简版）
+
+                # 获取数据
+                meta = validated_output.get("meta", {})
+                current_price = float(meta.get("price", latest_price))
                 primary = validated_output.get("primary_scenario", {})
-                print("🎯 主要预测：")
-                print(f"   方向：{'📈 看涨' if primary.get('direction') == 'up' else '📉 看跌'}")
-                print(f"   目标幅度：{primary.get('target_pct', 0):.1f}%")
-                print(f"   止损幅度：{primary.get('stop_pct', 0):.1f}%")
-                print(f"   概率：{primary.get('probability', 0) * 100:.0f}%")
-                print(f"   触发条件：{primary.get('trigger', '')}")
-                
+                scenarios = validated_output.get("scenarios", [])
+
+                # 结构判断（从 structure_judgment 提取）
+                structure = validated_output.get("structure_judgement", {})
+                trend_desc = structure.get("trend", "未知")
+                price_pos = structure.get("price_position", "未知")
+
+                # 显示结构判断
+                print(f"\n📊 结构判断：{trend_desc}，价格位置：{price_pos}")
+
+                # 显示策略详情（分行显示，更清晰）
+                print("\n【策略分析】")
+
+                up_scenarios = [s for s in scenarios if s.get("direction") == "up"]
+                down_scenarios = [s for s in scenarios if s.get("direction") == "down"]
+                range_scenarios = [s for s in scenarios if s.get("direction") == "range"]
+
+                up_prob = sum(s.get("probability", 0) for s in up_scenarios)
+                down_prob = sum(s.get("probability", 0) for s in down_scenarios)
+                range_prob = sum(s.get("probability", 0) for s in range_scenarios)
+
+                # 做多策略
+                if up_prob > 0:
+                    if up_scenarios:
+                        s = up_scenarios[0]
+                        tr = s.get("target_range")
+                        er = s.get("entry_range")  # 入场点位区间
+                        if tr and len(tr) == 2:
+                            # target_range 只是目标区间，止损需要另外计算
+                            # 做多：目标是上界，止损是下界
+                            tgt_low, tgt_high = tr[0], tr[1]  # 0=下界, 1=上界
+                            # 止损在下界或当前价下方2%
+                            stp = min(tr[0], current_price * 0.98)  # 取下界或当前价*0.98
+                            # 入场点位区间
+                            if er and len(er) == 2:
+                                entry_low, entry_high = er[0], er[1]
+                                print(f"  📈 做多({up_prob*100:.0f}%): 入场{entry_low:,.0f}-{entry_high:,.0f} 目标{tgt_high:,.0f} 止损{stp:,.0f}")
+                            else:
+                                # 没有入场区间时，默认在当前价格附近
+                                print(f"  📈 做多({up_prob*100:.0f}%): 入场{current_price:,.0f}附近 目标{tgt_high:,.0f} 止损{stp:,.0f}")
+                        else:
+                            tgt_pct = s.get("target_pct", 2)
+                            stp_pct = s.get("stop_pct", 1)
+                            tgt = current_price * (1 + tgt_pct / 100)
+                            stp = current_price * (1 - stp_pct / 100)
+                            trigger = s.get("trigger", "")[:30]
+                            print(f"  📈 做多({up_prob*100:.0f}%): 入场{current_price:,.0f}附近 目标{tgt:,.0f}({tgt_pct:.1f}%) 止损{stp:,.0f}")
+
+                # 做空策略
+                if down_prob > 0:
+                    if down_scenarios:
+                        s = down_scenarios[0]
+                        tr = s.get("target_range")
+                        er = s.get("entry_range")  # 入场点位区间
+                        if tr and len(tr) == 2:
+                            # 做空：目标是下界，止损是上界
+                            tgt_low, tgt_high = tr[0], tr[1]  # 0=下界, 1=上界
+                            # 止损在上界或当前价上方2%
+                            stp = max(tr[0], current_price * 1.02)  # 取上界或当前价*1.02
+                            # 入场点位区间
+                            if er and len(er) == 2:
+                                entry_low, entry_high = er[0], er[1]
+                                print(f"  📉 做空({down_prob*100:.0f}%): 入场{entry_low:,.0f}-{entry_high:,.0f} 目标{tgt_low:,.0f} 止损{stp:,.0f}")
+                            else:
+                                # 没有入场区间时，默认在当前价格附近
+                                print(f"  📉 做空({down_prob*100:.0f}%): 入场{current_price:,.0f}附近 目标{tgt_low:,.0f} 止损{stp:,.0f}")
+                        else:
+                            tgt_pct = s.get("target_pct", 2)
+                            stp_pct = s.get("stop_pct", 1)
+                            tgt = current_price * (1 - tgt_pct / 100)
+                            stp = current_price * (1 + stp_pct / 100)
+                            trigger = s.get("trigger", "")[:30]
+                            print(f"  📉 做空({down_prob*100:.0f}%): 入场{current_price:,.0f}附近 目标{tgt:,.0f}({tgt_pct:.1f}%) 止损{stp:,.0f}")
+
+                # 震荡策略
+                if range_prob > 0:
+                    if range_scenarios:
+                        s = range_scenarios[0]
+                        tr = s.get("target_range")
+                        er = s.get("entry_range")  # 入场点位区间
+                        if tr and len(tr) == 2:
+                            # 震荡策略的 target_range 就是震荡区间
+                            # entry_range 是建议的入场区间
+                            if er and len(er) == 2:
+                                print(f"  ↔️ 震荡({range_prob*100:.0f}%): 入场{er[0]:,.0f}-{er[1]:,.0f} 区间{tr[0]:,.0f}-{tr[1]:,.0f} 高抛低吸")
+                            else:
+                                print(f"  ↔️ 震荡({range_prob*100:.0f}%): 区间{tr[0]:,.0f} - {tr[1]:,.0f} 高抛低吸")
+                        else:
+                            tgt = s.get("target_pct", 2)
+                            low = current_price * (1 - tgt / 100)
+                            high = current_price * (1 + tgt / 100)
+                            print(f"  ↔️ 震荡({range_prob*100:.0f}%): 区间{low:,.0f} - {high:,.0f}")
+
+                # 关键价位
+                zs = structure.get("zs", {})
+                if zs:
+                    print(f"\n📍 关键位: ZG={zs.get('zg',0):.0f} ZD={zs.get('zd',0):.0f} GG={zs.get('gg',0):.0f} DD={zs.get('dd',0):.0f}")
+
+                # 主要预测（精简一行）
+                direction = primary.get("direction", "up")
+                direction_emoji = "📈" if direction == "up" else "📉"
+                target_pct = primary.get("target_pct", 0)
+                stop_pct = primary.get("stop_pct", 0)
+                probability = primary.get("probability", 0)
+
+                if direction == "up":
+                    target_price = current_price * (1 + target_pct / 100)
+                    stop_price = current_price * (1 - stop_pct / 100)
+                else:
+                    target_price = current_price * (1 - target_pct / 100)
+                    stop_price = current_price * (1 + stop_pct / 100)
+
+                print(f"🎯 主推：{direction_emoji} 目标{target_price:,.0f} 止损{stop_price:,.0f} 概率{probability*100:.0f}%")
+
+                # 2.5 v2.0 新增：状态机显示
+                if "state_machine" in validated_output:
+                    try:
+                        from state_machine_converter import format_state_machine_for_display
+                        state_machine = validated_output["state_machine"]
+                        print(format_state_machine_for_display(state_machine))
+                    except Exception as sm_display_err:
+                        print(f"   ⚠️  状态机显示失败: {sm_display_err}")
+
                 # 2.5 信号质量评分（显示报告）
                 if "signal_quality" in validated_output:
                     try:
@@ -855,11 +1099,9 @@ def main():
                         # 如果详细报告失败，仍然显示简化版
                         sq = validated_output["signal_quality"]
                         print(f"\n  信号质量评分: {sq['total_score']:.1f}/100 (评级: {sq['grade']})")
-                
-                # 3. 显示完整 JSON（供调试或程序化使用）
-                print("\n📊 完整结构化数据：")
-                print(json.dumps(validated_output, ensure_ascii=False, indent=2))
-                print("=" * 60)
+
+                # 3. 显示完整 JSON 已移除（避免与 format_cli_output 重复输出）
+                # 如需查看完整JSON，可查看数据库或添加 --verbose 参数
                     
             except json.JSONDecodeError as e:
                 print(f"   ✗ JSON 解析失败: {e}")

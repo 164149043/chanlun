@@ -8,9 +8,104 @@
 - 包含缠论术语解释和结构摘要
 """
 import json
-from typing import Dict, Any
+import os
+from typing import Dict, Any, Optional
 from ai_output_schema import get_schema_template
 from stat_hint import get_stat_hint
+
+
+# ============================================
+# Token 管理机制（新增）
+# ============================================
+
+# Token 配置（从环境变量读取，默认2800）
+MAX_TOKENS = int(os.getenv("AI_MAX_TOKENS", "2800"))
+SAFE_TOKENS = MAX_TOKENS - 200  # 保留200 tokens buffer
+
+# 内容优先级配置
+CONTENT_PRIORITY = {
+    "critical": [  # 必需内容，不可裁剪
+        "system_block",      # 系统约束
+        "structure_block",   # 缠论结构数据
+        "output_block",      # 输出格式约束
+    ],
+    "important": [  # 重要内容，优先保留
+        "summary_block",    # 当前结构摘要
+        "stat_block",       # 统计提示
+    ],
+    "optional": [  # 可选内容，可裁剪
+        "TERMINOLOGY_BLOCK", # 术语解释（较长）
+        "learning_block",   # AI自我认知
+        "history_block",    # 历史统计
+        "similar_cases_block", # 相似案例
+    ]
+}
+
+
+def estimate_tokens(text: str) -> int:
+    """估算文本的 token 数量（粗略估算：中文≈0.7 token/字，英文≈0.25 token/字）"""
+    import re
+    # 统计中文字符
+    chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', text))
+    # 统计非中文字符
+    non_chinese = len(text) - chinese_chars
+    # 粗略估算
+    return int(chinese_chars * 0.7 + non_chinese * 0.25)
+
+
+def build_prompt_with_token_management(
+    blocks: Dict[str, str],
+    max_tokens: int = SAFE_TOKENS
+) -> str:
+    """根据 token 限制构建 Prompt
+
+    参数：
+    - blocks: 各个内容块的字典 {block_name: content}
+    - max_tokens: 最大 token 数量
+
+    返回：
+    - 组装后的 Prompt
+    """
+    # 按优先级组装
+    prompt_parts = []
+    current_tokens = 0
+
+    # 1. 添加必需内容
+    for block_name in CONTENT_PRIORITY["critical"]:
+        if block_name in blocks and blocks[block_name]:
+            prompt_parts.append(blocks[block_name])
+            current_tokens += estimate_tokens(blocks[block_name])
+
+    # 2. 添加重要内容
+    for block_name in CONTENT_PRIORITY["important"]:
+        if block_name in blocks and blocks[block_name]:
+            tokens = estimate_tokens(blocks[block_name])
+            if current_tokens + tokens < max_tokens:
+                prompt_parts.append(blocks[block_name])
+                current_tokens += tokens
+
+    # 3. 添加可选内容（按需裁剪）
+    for block_name in CONTENT_PRIORITY["optional"]:
+        if block_name in blocks and blocks[block_name]:
+            tokens = estimate_tokens(blocks[block_name])
+            if current_tokens + tokens < max_tokens:
+                prompt_parts.append(blocks[block_name])
+                current_tokens += tokens
+            elif current_tokens < max_tokens:
+                # 尝试添加裁剪后的版本
+                content = blocks[block_name]
+                # 裁剪到剩余空间
+                remaining_tokens = max_tokens - current_tokens
+                ratio = remaining_tokens / tokens
+                # 简单裁剪：取前N%的内容
+                lines = content.split('\n')
+                keep_lines = int(len(lines) * ratio)
+                trimmed = '\n'.join(lines[:keep_lines])
+                if trimmed:
+                    prompt_parts.append(trimmed)
+                    current_tokens += estimate_tokens(trimmed)
+
+    return "\n".join(prompt_parts)
 
 
 def _format_strength_comparison(comparison: str) -> str:
@@ -24,24 +119,67 @@ def _format_strength_comparison(comparison: str) -> str:
     return mapping.get(comparison, "未知")
 
 
-# 缠论术语解释模板
+# 缠论术语解释模板（精简版）
 TERMINOLOGY_BLOCK = """
-【缠论核心术语解释】
-1. **笔（Bi）**：由相邻的顶分型和底分型连接形成，是最小的趋势单位
-2. **线段（XD）**：由至少3笔组成，当特征序列出现反向分型时线段结束
-3. **中枢（ZhongShu/ZS）**：至少3笔重叠的价格区间
-   - ZG：中枢高点（三笔重叠区间的上边界）
-   - ZD：中枢低点（三笔重叠区间的下边界）
-   - GG：中枢内所有笔的最高点
-   - DD：中枢内所有笔的最低点
-4. **买卖点**：
-   - 1buy（一类买点）：下跌趋势背驰后的低点
-   - 2buy（二类买点）：一买后回调不破低点
-   - 3buy（三类买点）：中枢震荡后向上突破回踩不进中枢
-   - 1sell/2sell/3sell：对应的卖点
-5. **背驰（BC）**：走势延续但力度减弱，预示趋势可能反转
-6. **力度（Strength）**：衡量笔的强弱，力度减弱（weakening）提示背驰可能
+【缠论核心术语】
+笔（Bi）：顶底分型连接的最小趋势单位
+线段（XD）：3笔以上，特征序列反向分型结束
+中枢（ZS）：3笔重叠区，ZG/ZD边界，GG/DD极值
+买卖点：1buy（背驰低点）、2buy（不破前低）、3buy（突破回踩）
+背驰（BC）：力度减弱预示反转
 """
+
+
+def enhance_learning_feedback(
+    learning_feedback: str,
+    current_direction: str = None,
+    current_signal: str = None,
+) -> str:
+    """深度化AI自我认知反馈（Step2改进）
+
+    参数：
+    - learning_feedback: 原始自我认知文本
+    - current_direction: 当前预测方向（up/down/range），用于针对性警告
+    - current_signal: 当前信号类型（1buy/2buy等），用于针对性警告
+
+    返回：
+    - 分层次、结构化的自我认知文本
+    """
+    if not learning_feedback:
+        return ""
+
+    # 如果反馈已经是结构化的，直接返回
+    if "整体表现" in learning_feedback or "分维度表现" in learning_feedback:
+        # 根据当前方向/信号添加特定警告
+        if current_direction and current_direction in ["up", "down", "range"]:
+            dir_name = {"up": "看涨", "down": "看跌", "range": "震荡"}.get(current_direction, current_direction)
+            learning_feedback += f"\n  ⚠️ 本次预测方向：{dir_name}"
+        if current_signal:
+            learning_feedback += f"\n  ⚠️ 本次信号类型：{current_signal}"
+        return learning_feedback
+
+    # 简单增强：添加结构化标题
+    lines = []
+    lines.append("\n【AI自我认知报告】")
+    lines.append("-" * 40)
+
+    # 逐行处理原始反馈
+    for line in learning_feedback.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        lines.append(f"  {line}")
+
+    # 添加当前场景特定警告
+    if current_direction and current_direction in ["up", "down", "range"]:
+        dir_name = {"up": "看涨", "down": "看跌", "range": "震荡"}.get(current_direction, current_direction)
+        lines.append(f"  本次预测方向：{dir_name}")
+    if current_signal:
+        lines.append(f"  本次信号类型：{current_signal}")
+
+    lines.append("-" * 40)
+
+    return "\n".join(lines)
 
 
 def build_structured_prompt(
@@ -51,26 +189,26 @@ def build_structured_prompt(
     learning_feedback: str = "",
 ) -> str:
     """构造结构化输出 Prompt（强制 JSON 输出，含统计提示 + 历史表现 + 相似案例 + 自我认知）
-    
+
     参数：
     - ai_json: 符合规范的 AI 输入 JSON
     - stats_context: 历史统计上下文（可选，整体表现）
     - history_context: 相似案例上下文（可选，P0新增）
     - learning_feedback: AI自我认知/学习反馈（可选，Step1新增）
-    
+
     返回：
     - 强制约束的 Prompt 字符串
     """
-    
+
     json_str = json.dumps(ai_json, ensure_ascii=False, indent=2)
     schema = get_schema_template()
-    
+
     meta = ai_json.get("meta", {})
     market = ai_json.get("market", {})
     symbol = meta.get("symbol", "Unknown")
     interval = meta.get("interval", "Unknown")
     latest_price = float(market.get("latest_price", 0.0))
-    
+
     # 获取结构摘要（新增）
     structure_summary = ai_json.get("structure_summary", {})
     trend_desc = structure_summary.get("trend_description", "未知")
@@ -78,17 +216,17 @@ def build_structured_prompt(
     key_levels = structure_summary.get("key_levels", {})
     strength_comparison = structure_summary.get("strength_comparison", "unknown")
     price_position = structure_summary.get("price_position", "unknown")
-    
+
     # 计算当前结构是否在中枢内
     in_zs = price_position == "inside_zs"
-    
+
     # === A2.5 统计提示 ===
     stat = get_stat_hint(symbol=symbol, interval=interval, in_zs=in_zs)
     win_rate_str = (
         f"{stat['win_rate']}" if stat.get("win_rate") is not None else "N/A"
     )
     pos_label = "中枢内" if in_zs else "中枢外"
-    
+
     stat_block = f"""
 【统计提示 A2.5｜仅供参考】
 交易对：{symbol}，周期：{interval}，结构位置：{pos_label}
@@ -96,8 +234,8 @@ def build_structured_prompt(
 历史胜率：{win_rate_str}
 结论：{stat["hint"]}
 """
-    
-    # === 当前结构摘要（新增） ===
+
+    # === 当前结构摘要（新增）===
     summary_block = f"""
 【当前结构摘要】
 - 交易对：{symbol}，周期：{interval}
@@ -108,91 +246,114 @@ def build_structured_prompt(
 - 中枢区间：ZG={key_levels.get('zg', 0):.0f}, ZD={key_levels.get('zd', 0):.0f}
 - 中枢波动：GG={key_levels.get('gg', 0):.0f}, DD={key_levels.get('dd', 0):.0f}
 """
-    
-    # === 系统约束（强约束） ===
+
+    # === 系统约束（强约束，精简版）===
     system_block = """
 【系统约束】
-你是一个【缠论结构分析引擎】，不是聊天机器人。
-你只能基于给定的缠论结构 JSON 进行分析。
-【统计提示】仅用于背景参考，不得作为结论依据，不得反向推理。
-【历史表现】可用于调整预测策略，但不得复述原文。
-
-【严禁事项】
-- 禁止使用技术指标（均线、MACD、RSI 等）
-- 禁止引入外部行情、消息、情绪
-- 禁止超出提供数据进行推断
-- 禁止输出 Schema 之外的字段
-
-【分析重点】
-1. 基于中枢位置判断多空优势
-2. 基于力度对比判断背驰可能
-3. 基于买卖点信号确定操作方向
-4. 给出具体的价格点位（入场/止损/目标）
+你是一个【缠论结构分析引擎】。
+【严禁】使用技术指标、引入外部数据、超出数据推断。
 """
-    
-    # === 历史表现上下文（可选） ===
+
+    # === 历史表现上下文（可选）===
     history_block = ""
     if stats_context:
         history_block = stats_context + "\n"
-    
-    # === 相似案例上下文（P0新增） ===
+
+    # === 相似案例上下文（P0新增）===
     similar_cases_block = ""
     if history_context:
         similar_cases_block = history_context + "\n"
-    
-    # === AI自我认知（Step1新增） ===
+
+    # === AI自我认知（Step2改进：深度化）===
     learning_block = ""
     if learning_feedback:
-        learning_block = learning_feedback + "\n"
-    
+        learning_block = enhance_learning_feedback(learning_feedback) + "\n"
+
     # === 缠论结构 JSON ===
     structure_block = f"""
 【缠论结构 JSON】
 {json_str}
 """
-    
-    # === 输出格式约束（含 JSON Schema） ===
+
+    # === 结构优先级说明（v2.1新增）===
+    structure_priority_block = """
+【缠论分析核心原则：结构优先】
+在进行概率分配时，请严格遵循以下优先级：
+
+1. **中枢关系 > 笔力度**
+   - extend 状态：优先判定为震荡（震荡概率应最高，通常≥40%）
+   - up_trend/down_trend 状态：优先判定为趋势方向（对应方向概率应最高）
+   - new 状态：谨慎判断，分布应更均衡（避免某一方向概率>50%）
+
+2. **价格位置作为辅助判断**
+   - 价格在中枢内部（inside_zs）：震荡概率增加
+   - 价格在中枢上方（above_zs）：偏多头，但需警惕回落
+   - 价格在中枢下方（below_zs）：偏空头，但需警惕反弹
+
+3. **买卖点信号作为加成（不是主判断）**
+   - 1类买卖点：对应方向 +10%
+   - 2类买卖点：对应方向 +8%
+   - 3类买卖点：对应方向 +5%
+   注意：买卖点是入场时机，不应改变基于结构的主方向判断
+
+4. **背驰信号预警**
+   - 力度背驰：注意可能的反转
+   - 但需结合结构判断，不能仅凭背驰改变主方向
+   例如：extend 状态下的背驰可能只是震荡中的小反转
+
+5. **错误示例避免**：
+   - ❌ 中枢 extend + 价格 below_zs + 向下笔力度增强 → 给做空最高概率
+     ✅ 正确：extend 状态优先震荡，震荡概率应最高
+   - ❌ 中枢 new 状态 → 给某单一方向 >50% 概率
+     ✅ 正确：new 状态应谨慎判断，各方向概率分布更均衡
+"""
+
+    # === 输出格式约束（含 JSON Schema，增强版）===
     output_block = f"""
-【输出格式约束】
-1. 必须输出一个合法 JSON，严格符合下方 JSON Schema。
-2. 不得复述或引用【统计提示】中的任何数字或文字。
-3. 不得使用“因为历史胜率…”等基于统计的表述。
-4. 字段名、层级、类型必须完全一致；数值使用 number，概率 0~1。
-5. 不允许出现 markdown 代码块标记，不允许多余文本。
-6. scenarios 的概率总和应不超过 1.05。
-7. primary_scenario 必须填写，作为最主要场景，字段含义如下：
-   - direction: "up" 或 "down"（不能是 "range"）
-   - target_pct: 目标涨跌幅（正数，如 5.0 表示 5%）
-     * 1h周期：建议 1.5-3.0%（BTC）、2.0-4.0%（ETH）
-     * 4h周期：建议 3.0-6.0%（BTC）、4.0-8.0%（ETH）
-     * 1d周期：建议 5.0-10.0%（BTC）、6.0-12.0%（ETH）
-   - stop_pct: 止损幅度（正数，如 2.0 表示 2%）
-     * 建议为 target_pct 的 40-60%
-   - probability: 0~1 之间
-   - trigger: 触发条件（使用缠论术语，如"突破中枢ZG"、"回踩不破ZD"）
-   - reasoning: 逻辑推导（说明基于哪些缠论结构得出结论）
-8. analysis 字段（必须填写）：
-   - 3-5 段话的完整文字分析
-   - 给交易者看的市场解读和操作策略
-   - 必须包含以下内容：
-     a) 当前结构判断（笔、线段、中枢状态，力度对比）
-     b) 可能走势分析（2-3种场景）
-     c) 关键价位（支撑位、阻力位、中枢区间 ZG/ZD/GG/DD）
-     d) **做多策略（概率 XX%）**：入场点位、目标位、止损位（如果适合做多）
-     e) **做空策略（概率 XX%）**：入场点位、目标位、止损位（如果适合做空）
-     f) **震荡策略（概率 XX%）**：价格区间、高抛低吸点位（如果是震荡）
-   - 概率应与 scenarios 中对应方向的概率一致
-   - 使用缠论术语，通俗易懂，给出具体价格
+【输出格式】
+1. 必须输出符合 Schema 的合法 JSON
+2. scenarios 概率总和不超过 1.05
+3. primary_scenario.direction 必须是 "up" 或 "down"
+4. scenarios 中每个场景的 target_range 必须符合当前价格方向逻辑：
+   - 做多(up): target_range 的两个值都应该高于当前价格
+   - 做空(down): target_range 的两个值都应该低于当前价格
+   - 震荡(range): target_range 必须包含当前价格在区间内
+5. scenarios 中每个场景必须包含 entry_range（入场点位区间）：
+   - entry_range 是建议的入场价格区间 [低, 高]
+   - 做多: entry_range 应在当前价格附近或略下方
+   - 做空: entry_range 应在当前价格附近或略上方
+   - 震荡: entry_range 应在震荡区间内
+6. analysis 字段必须包含（格式化给交易者看）：
+   a) 当前结构判断（笔、线段、中枢状态，力度对比）
+   b) 可能走势分析（2-3种场景，每种含：方向+概率+触发条件）
+   c) 关键价位 ZG/ZD/GG/DD
+   d) 【做多策略】（概率 XX%）：入场点位区间、目标、止损
+   e) 【做空策略】（概率 XX%）：入场点位区间、目标、止损
+   f) 【震荡策略】（概率 XX%）：价格区间、高抛低吸
+   注：三种策略概率总和≈100%，与scenarios数组一致
 
 【JSON Schema】
 ```json
 {schema}
 ```
-
-请直接输出符合 Schema 的 JSON，不要有任何其他内容：
 """
-    
-    return TERMINOLOGY_BLOCK + "\n" + system_block + "\n" + learning_block + history_block + similar_cases_block + summary_block + "\n" + stat_block + "\n" + structure_block + "\n" + output_block
+
+    # === 使用 Token 管理（新增）===
+    blocks = {
+        "system_block": system_block,
+        "structure_block": structure_block,
+        "structure_priority_block": structure_priority_block,
+        "output_block": output_block,
+        "summary_block": summary_block,
+        "stat_block": stat_block,
+        "TERMINOLOGY_BLOCK": TERMINOLOGY_BLOCK,
+        "learning_block": learning_block,
+        "history_block": history_block,
+        "similar_cases_block": similar_cases_block,
+    }
+
+    # 使用 Token 管理机制组装 Prompt
+    return build_prompt_with_token_management(blocks, max_tokens=SAFE_TOKENS)
 
 
 def build_prompt(
@@ -488,12 +649,12 @@ def build_table_format_prompt(
 ### 五、操作建议
 
 **多头策略**：
-- 介入点位：[具体价格]
+- 入场点位区间：[价格低点 - 价格高点]
 - 止损位：[具体价格]
 - 目标位：[价格区间]
 
 **空头策略**：
-- 介入点位：[具体价格]
+- 入场点位区间：[价格低点 - 价格高点]
 - 止损位：[具体价格]
 - 目标位：[价格区间]
 
@@ -679,3 +840,123 @@ def build_multi_level_prompt(multi_level_data: Dict[str, Any]) -> str:
 
 请直接输出符合 Schema 的 JSON：
 """
+
+
+def build_state_machine_prompt(
+    ai_json: Dict[str, Any],
+    stats_context: str = "",
+    history_context: str = "",
+    learning_feedback: str = "",
+) -> str:
+    """
+    构建状态机模式的 Prompt（v2.0 新增）
+
+    强制 AI 输出状态机格式，而非多场景并列模式
+
+    参数：
+    - ai_json: 缠论结构 JSON
+    - stats_context: 历史统计上下文
+    - history_context: 相似案例上下文
+    - learning_feedback: AI 自我认知
+
+    返回：
+    - 状态机模式的 Prompt
+    """
+    from ai_output_schema import get_state_machine_schema_template
+
+    json_str = json.dumps(ai_json, ensure_ascii=False, indent=2)
+    schema = get_state_machine_schema_template()
+
+    meta = ai_json.get("meta", {})
+    market = ai_json.get("market", {})
+    symbol = meta.get("symbol", "Unknown")
+    interval = meta.get("interval", "Unknown")
+    latest_price = float(market.get("latest_price", 0.0))
+
+    # 获取结构摘要
+    structure_summary = ai_json.get("structure_summary", {})
+    trend_desc = structure_summary.get("trend_description", "未知")
+    position_desc = structure_summary.get("position_description", "未知")
+    key_levels = structure_summary.get("key_levels", {})
+    price_position = structure_summary.get("price_position", "unknown")
+
+    # 统计提示
+    in_zs = price_position == "inside_zs"
+    stat = get_stat_hint(symbol=symbol, interval=interval, in_zs=in_zs)
+    win_rate_str = f"{stat['win_rate']}" if stat.get("win_rate") is not None else "N/A"
+
+    stat_block = f"""
+【统计提示】
+交易对：{symbol}，周期：{interval}，结构位置：{"中枢内" if in_zs else "中枢外"}
+样本数量：{stat["sample"]}
+历史胜率：{win_rate_str}
+"""
+
+    # 历史上下文块
+    history_block = ""
+    if history_context:
+        history_block = history_context + "\n"
+
+    # 学习反馈块
+    learning_block = ""
+    if learning_feedback:
+        learning_block = learning_feedback + "\n"
+
+    # 系统约束（状态机专用）
+    system_block = """
+【系统约束】
+你是一个"交易决策状态机生成器"，不是分析师。
+
+【强制规则】
+1. 任意时刻，只能有一个 active_strategy
+2. active_strategy 必须有明确状态（WAIT / READY / ACTIVE）
+3. entry 必须是"结构触发 + 价格区间"，不能只有价格
+4. 必须定义 invalidation 条件（什么情况下放弃当前策略）
+5. 如果历史胜率 < 30%，必须输出 WAIT_CONFIRMATION 或 OBSERVE_ONLY 状态
+6. 禁止同时给出做多 / 做空 / 震荡的完整策略（只能有一个激活）
+"""
+
+    # 缠论结构 JSON
+    structure_block = f"""
+【缠论结构 JSON】
+{json_str}
+"""
+
+    # 输出格式约束
+    output_block = f"""
+【输出格式】
+1. 必须输出符合 Schema 的合法 JSON
+2. state_machine.current_state 必须是 STRATEGY_ACTIVE / WAIT_CONFIRMATION / OBSERVE_ONLY 之一
+3. state_machine.active_strategy 必须包含：
+   - direction: 策略方向（up/down）
+   - status: 策略状态（WAIT/READY/ACTIVE/INVALIDATED）
+   - entry_gate: 入场门槛（必须包含 price_zone 和 structure_required）
+   - execution: 执行参数（stop_loss, target, rr）
+4. structure_required 不能为空，必须是具体的缠论术语条件
+5. 必须定义 invalidation.invalidate_active_if（至少1个条件）
+6. 如果历史胜率低，自动降级状态：
+   - 胜率 < 25% → OBSERVE_ONLY
+   - 胜率 25-35% → WAIT_CONFIRMATION
+   - 胜率 > 35% → STRATEGY_READY
+
+【JSON Schema】
+```json
+{schema}
+```
+"""
+
+    # 组装 Prompt
+    blocks = {
+        "system_block": system_block,
+        "structure_block": structure_block,
+        "output_block": output_block,
+        "stat_block": stat_block,
+        "TERMINOLOGY_BLOCK": TERMINOLOGY_BLOCK,
+        "learning_block": learning_block,
+        "history_block": history_block,
+    }
+
+    prompt = build_prompt_with_token_management(blocks, max_tokens=SAFE_TOKENS)
+
+    return prompt
+

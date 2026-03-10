@@ -144,6 +144,13 @@ def convert_to_chanlun_bars(klines: List[Dict[str, Any]]) -> List[Bar]:
     - 不丢失任何 K 线记录（长度与输入列表一致）。
     """
 
+    # 添加空列表检查（修复：避免处理空数据）
+    if not klines:
+        return []
+
+    if not isinstance(klines, list):
+        raise TypeError(f"klines 必须是列表类型，当前为: {type(klines)}")
+
     # 1. 先将输入解析为 BinanceBar 列表，便于校验与排序
     bars: List[BinanceBar] = []
     for item in klines:
